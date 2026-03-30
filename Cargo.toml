@@ -1,0 +1,19 @@
+[package]
+name = "vka"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+ash = "0.38.0"
+ash-window = "0.13.0"
+bitflags = "2.11.0"
+glam = "0.32.1"
+gpu-allocator = "0.28.0"
+itertools = "0.14.0"
+log = "0.4.29"
+parking_lot = "0.12.5"
+raw-window-handle = "0.6.2"
+
+[dev-dependencies]
+env_logger = "0.11.9"
