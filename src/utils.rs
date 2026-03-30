@@ -1,3 +1,6 @@
+use std::hash::DefaultHasher;
+use std::hash::Hasher;
+
 use ash::vk;
 use ash::vk::BaseOutStructure;
 use ash::vk::TaggedStructure;
@@ -12,6 +15,12 @@ impl AsExtent3D for vk::Extent2D {
     }
 }
 
+pub fn hash_struct<T: Sized>(s: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(bytes_of(s));
+    hasher.finish()
+}
+
 pub fn vulkan_version_str(version: u32) -> String {
     let major = vk::api_version_major(version);
     let minor = vk::api_version_minor(version);
@@ -19,7 +28,7 @@ pub fn vulkan_version_str(version: u32) -> String {
     format!("{}.{}.{}", major, minor, patch)
 }
 
-pub fn device_type_to_str(t: vk::PhysicalDeviceType) -> &'static str {
+pub fn device_type_str(t: vk::PhysicalDeviceType) -> &'static str {
     match t {
         vk::PhysicalDeviceType::INTEGRATED_GPU => "IntegratedGpu",
         vk::PhysicalDeviceType::DISCRETE_GPU => "DiscreteGpu",
@@ -30,7 +39,7 @@ pub fn device_type_to_str(t: vk::PhysicalDeviceType) -> &'static str {
 }
 
 pub fn device_full_name(props: &vk::PhysicalDeviceProperties) -> String {
-    format!("{} [{}]", props.device_name_as_c_str().unwrap().to_str().unwrap(), device_type_to_str(props.device_type))
+    format!("{} [{}]", props.device_name_as_c_str().unwrap().to_str().unwrap(), device_type_str(props.device_type))
 }
 
 pub fn find_sample_count(props: &vk::PhysicalDeviceProperties, requested: vk::SampleCountFlags) -> vk::SampleCountFlags {

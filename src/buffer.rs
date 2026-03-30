@@ -1,7 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::DefaultHasher;
-use std::hash::Hasher;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -16,6 +14,7 @@ use crate::RenderingDevice;
 use crate::Resource;
 use crate::VkaResult;
 use crate::bytes_of;
+use crate::utils;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -113,9 +112,7 @@ impl RenderingDevice {
     }
 
     pub fn buffer_view_with(&self, buffer: &Buffer, info: &vk::BufferViewCreateInfo) -> VkaResult<vk::BufferView> {
-        let mut hasher = DefaultHasher::new();
-        hasher.write(bytes_of(&info));
-        let hash = hasher.finish();
+        let hash = utils::hash_struct(info);
         if let Some(view) = buffer.views.borrow().get(&hash) {
             return VkaResult::Ok(*view);
         }

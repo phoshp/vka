@@ -2,9 +2,6 @@ use std::cell::Cell;
 use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -19,6 +16,7 @@ use crate::RenderingDevice;
 use crate::Resource;
 use crate::VkaResult;
 use crate::bytes_of;
+use crate::utils;
 
 /// A wrapper around a Vulkan image resource, providing additional metadata and caching for image views.
 ///
@@ -57,12 +55,6 @@ impl ImageImpl {
             .level_count(vk::REMAINING_MIP_LEVELS)
             .layer_count(vk::REMAINING_ARRAY_LAYERS)
     }
-}
-
-pub fn hash_image_view_create_info(info: &vk::ImageViewCreateInfo) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    hasher.write(bytes_of(&info));
-    hasher.finish()
 }
 
 pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
@@ -219,7 +211,7 @@ impl RenderingDevice {
     }
 
     pub fn image_view_create(&self, image: &Image, info: &vk::ImageViewCreateInfo) -> vk::ImageView {
-        let hash = hash_image_view_create_info(info);
+        let hash = utils::hash_struct(info);
         if let Some(view) = image.views.borrow().get(&hash) {
             return *view;
         }
