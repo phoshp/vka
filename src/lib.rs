@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefMut};
 use std::{cell::RefCell, ffi::CStr, mem::ManuallyDrop, ops::Deref, rc::Rc, sync::LazyLock};
 
 use ash::ext::debug_utils;
@@ -30,6 +30,8 @@ pub use gpu_allocator::MemoryLocation;
 pub use gpu_allocator::vulkan::Allocation;
 pub use gpu_allocator::vulkan::AllocationScheme;
 
+use crate::belt::StagingBelt;
+
 pub type VkaResult<T> = anyhow::Result<T>;
 
 pub static ENTRY: LazyLock<ash::Entry> = LazyLock::new(|| unsafe { ash::Entry::load().expect("Failed to load Vulkan library") });
@@ -55,11 +57,13 @@ impl Default for QueueFamilies {
 
 pub struct Frame {
     pub cmd_pool: vk::CommandPool,
-    pub front_cmd: Cell<vk::CommandBuffer>,
-    pub back_cmd: Cell<vk::CommandBuffer>,
+    front_cmd: Cell<vk::CommandBuffer>,
+    back_cmd: Cell<vk::CommandBuffer>,
 
     pub image_semaphore: vk::Semaphore,
     pub fence: vk::Fence,
+
+    pub belt: RefCell<StagingBelt>,
 }
 
 pub struct RenderingDeviceImpl {
@@ -303,6 +307,7 @@ impl RenderingDevice {
                         back_cmd: Cell::new(cmds[1]),
                         image_semaphore,
                         fence,
+                        belt: RefCell::new(StagingBelt::new(4 * 1024 * 1024)), // 4 MB per chunk
                     }
                 })
                 .collect_vec();
@@ -364,7 +369,7 @@ impl RenderingDevice {
         }
     }
 
-    pub fn current_frame(&self) -> &Frame {
+    pub fn frame(&self) -> &Frame {
         &self.frames[self.frame_index.get()]
     }
 
@@ -374,7 +379,7 @@ impl RenderingDevice {
                 log::info!("Swapchain is suboptimal, recreating");
                 self.recreate_swapchain();
             }
-            let frame = self.current_frame();
+            let frame = self.frame();
             let (image_index, suboptimal) = unsafe {
                 swapchain
                     .device
@@ -388,21 +393,21 @@ impl RenderingDevice {
     }
 
     pub fn get_cmd_buffer(&self) -> vk::CommandBuffer {
-        self.current_frame().front_cmd.get()
+        self.frame().front_cmd.get()
     }
 
-    pub fn record(&self, record_fn: impl FnOnce(&ash::Device, vk::CommandBuffer, &Frame)) {
-        let frame = self.current_frame();
+    pub fn record(&self, record_fn: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
         let cmd = self.get_cmd_buffer();
-        record_fn(&self.device, cmd, frame);
+        record_fn(&self.device, cmd);
     }
 
     pub fn submit(&self) -> VkaResult<()> {
         unsafe {
-            let frame = self.current_frame();
+            let frame = self.frame();
 
             self.device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
             self.device.reset_fences(&[frame.fence])?;
+            frame.belt.borrow_mut().reset();
 
             self.device.end_command_buffer(frame.front_cmd.get()).unwrap();
 
@@ -420,10 +425,25 @@ impl RenderingDevice {
 
             self.device.reset_command_buffer(frame.back_cmd.get(), vk::CommandBufferResetFlags::empty())?;
             frame.front_cmd.swap(&frame.back_cmd);
-            self.device.begin_command_buffer(frame.front_cmd.get(), &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+            self.device.begin_command_buffer(
+                frame.front_cmd.get(),
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
 
+            self.frame_index.set((self.frame_index.get() + 1) % self.frames.len());
             VkaResult::Ok(())
         }
+    }
+
+    pub fn wait_queue(&self) -> VkaResult<()> {
+        unsafe {
+            Ok(self.device.queue_wait_idle(self.graphics_queue)?)
+        }
+    }
+
+    pub fn submit_wait(&self) -> VkaResult<()> {
+        self.submit()?;
+        self.wait_queue()
     }
 
     pub fn present(&self) -> VkaResult<()> {
@@ -441,9 +461,99 @@ impl RenderingDevice {
                     .unwrap()
             };
             self.suboptimal_swapchain.set(self.suboptimal_swapchain.get() || suboptimal);
-            self.frame_index.set((self.frame_index.get() + 1) % self.frames.len());
         }
         VkaResult::Ok(())
+    }
+
+    pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> VkaResult<()> {
+        let ptr = {
+            self.frame().belt.borrow_mut().read(self, buffer, offset, data.len() as u64)?
+        };
+        let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
+        self.submit_wait()?;
+        data.copy_from_slice(read);
+        VkaResult::Ok(())
+    }
+
+    pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) {
+        if let Some((staging_buf, cursor, size)) = self.frame().belt.borrow_mut().write(self, bytes_of(data)) {
+            self.record(|dev, cmd| unsafe {
+                self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+                dev.cmd_copy_buffer(
+                    cmd,
+                    staging_buf.handle,
+                    buffer.handle,
+                    &[vk::BufferCopy::default().src_offset(cursor).dst_offset(offset).size(size)],
+                );
+                self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+            });
+        }
+    }
+
+    pub fn write_image<T>(
+        &self,
+        image: &Image,
+        data: &[T],
+        offset: vk::Offset3D,
+        extent: vk::Extent3D,
+        subresource: vk::ImageSubresourceLayers,
+        new_layout: Option<vk::ImageLayout>,
+    ) {
+        if let Some((staging_buf, cursor, size)) = self.frame().belt.borrow_mut().write(self, bytes_of(data)) {
+            self.record(|dev, cmd| unsafe {
+                let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                dev.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buf.handle,
+                    image.handle,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[vk::BufferImageCopy::default()
+                        .buffer_offset(cursor)
+                        .image_subresource(subresource)
+                        .image_offset(offset)
+                        .image_extent(extent)],
+                );
+                self.barrier_image(cmd, image, new_layout.unwrap_or(prev));
+            });
+        }
+    }
+
+    pub fn init_image<T>(&self, image: &Image, data: &[T]) {
+        self.write_image(
+            image,
+            data,
+            vk::Offset3D::default(),
+            image.extent,
+            vk::ImageSubresourceLayers::default().aspect_mask(image.aspect).layer_count(1),
+            Some(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        )
+    }
+
+    pub fn copy_buffer(&self, src_buf: &Buffer, dst_buf: &Buffer, regions: &[vk::BufferCopy]) {
+        self.record(|dev, cmd| unsafe {
+            self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            dev.cmd_copy_buffer(cmd, src_buf.handle, dst_buf.handle, regions);
+            self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+    }
+
+    pub fn copy_image(&self, src_img: &Image, dst_img: &Image, regions: &[vk::ImageCopy]) {
+        self.record(|dev, cmd| unsafe {
+            let prev1 = self.barrier_image(cmd, src_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            let prev2 = self.barrier_image(cmd, dst_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+
+            dev.cmd_copy_image(
+                cmd,
+                src_img.handle,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                dst_img.handle,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                regions,
+            );
+
+            self.barrier_image(cmd, src_img, prev1);
+            self.barrier_image(cmd, dst_img, prev2);
+        });
     }
 }
 
@@ -455,12 +565,18 @@ impl Drop for RenderingDeviceImpl {
             if let Some(debug_utils) = &self.debug_utils {
                 debug_utils.instance.destroy_debug_utils_messenger(debug_utils.messenger, None);
             }
+            // for chunk in self.belt.borrow_mut().active_chunks.iter_mut() {
+            //     Rc::get_mut(&mut chunk.buffer).unwrap().destroy(self);
+            // }
+            // if let Some(mut readback) = self.belt.borrow_mut().readback_buffer.take() {
+            //     Rc::get_mut(&mut readback).unwrap().destroy(self);
+            // }
+
             for frame in self.frames.iter() {
                 self.device.destroy_fence(frame.fence, None);
                 self.device.destroy_semaphore(frame.image_semaphore, None);
                 self.device.destroy_command_pool(frame.cmd_pool, None);
             }
-
             if let Some(swapchain) = self.swapchain.borrow().as_ref() {
                 for &sem in swapchain.present_semaphores.iter() {
                     self.device.destroy_semaphore(sem, None);

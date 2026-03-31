@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::ops::Range;
 use std::rc::Rc;
 use std::rc::Weak;
@@ -20,7 +21,7 @@ pub struct Resource<T> {
     pub alloc: Option<Allocation>,
     pub device: Weak<RenderingDeviceImpl>,
     name: OnceCell<String>,
-    dtor: Option<Box<dyn FnMut(&mut Self, &RenderingDevice)>>,
+    dtor: Option<Box<dyn FnMut(&mut Self, &RenderingDeviceImpl)>>,
 }
 
 impl<T> Deref for Resource<T> {
@@ -31,7 +32,7 @@ impl<T> Deref for Resource<T> {
 }
 
 impl<T> Resource<T> {
-    pub fn new(rd: &RenderingDevice, value: T, alloc: Option<Allocation>, dtor: impl FnMut(&mut Resource<T>, &RenderingDevice) + 'static) -> Handle<T> {
+    pub fn new(rd: &RenderingDevice, value: T, alloc: Option<Allocation>, dtor: impl FnMut(&mut Resource<T>, &RenderingDeviceImpl) + 'static) -> Handle<T> {
         let device = Rc::downgrade(&rd.0);
         Rc::new(Self {
             value,
@@ -61,26 +62,27 @@ impl<T> Resource<T> {
     pub fn alloc(&self) -> Option<&Allocation> {
         self.alloc.as_ref()
     }
+
+    pub fn destroy(&mut self, rd: &RenderingDeviceImpl) {
+        let res_name = self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()).to_string();
+        log::debug!("Dropping resource {}", res_name);
+        // hmm, not the best way, maybe we can use deferred cleanup.
+        unsafe { rd.device.queue_wait_idle(rd.graphics_queue).unwrap(); }
+
+        let alloc = self.alloc.take();
+        if let Some(mut dtor) = self.dtor.take() {
+            dtor(self, &rd);
+        }
+        if let Some(alloc) = alloc {
+            rd.allocator.lock().unwrap().free(alloc);
+        }
+    }
 }
 
 impl<T> Drop for Resource<T> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
-            return;
-        }
-        log::debug!("Dropping resource {}", self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()));
-
-        if let Some(rd) = self.device.upgrade().map(RenderingDevice) {
-            // hmm, not the best way, maybe we can use deferred cleanup.
-            unsafe { rd.device.queue_wait_idle(rd.graphics_queue).unwrap(); }
-
-            let alloc = self.alloc.take();
-            if let Some(mut dtor) = self.dtor.take() {
-                dtor(self, &rd);
-            }
-            if let Some(alloc) = alloc {
-                rd.allocator.lock().unwrap().free(alloc);
-            }
+        if let Some(rd) = self.device.upgrade() {
+            self.destroy(&rd);
         }
     }
 }
@@ -98,9 +100,11 @@ impl RenderingDevice {
         }
     }
 
-    pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, new_layout: vk::ImageLayout) {
-        self.barrier_image_from(cmd, image.handle, image.aspect, image.layout.get(), new_layout);
+    pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, new_layout: vk::ImageLayout) -> vk::ImageLayout {
+        let prev_layout = image.layout.get();
+        self.barrier_image_from(cmd, image.handle, image.aspect, prev_layout, new_layout);
         image.layout.set(new_layout);
+        prev_layout
     }
 
     pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {

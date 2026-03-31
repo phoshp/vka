@@ -1,22 +1,56 @@
+use std::cell::RefCell;
 use std::ptr;
 
+use anyhow::Ok;
+use anyhow::anyhow;
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 
 use crate::Buffer;
 use crate::RenderingDevice;
+use crate::VkaResult;
 use crate::utils;
 
 pub const COPY_ALIGNMENT: u64 = 4;
 
 pub struct StagingBelt {
     chunk_size: u64,
-    active_chunks: Vec<StagingChunk>,
+    pub(crate) active_chunks: Vec<StagingChunk>,
+    pub(crate) readback_buffer: Option<Buffer>,
 }
 
 impl StagingBelt {
     pub fn new(chunk_size: u64) -> Self {
-        Self { chunk_size, active_chunks: Vec::new() }
+        Self {
+            chunk_size,
+            active_chunks: Vec::new(),
+            readback_buffer: None,
+        }
+    }
+
+    pub fn read(&mut self, rd: &RenderingDevice, buffer: &Buffer, offset: u64, size: u64) -> VkaResult<*mut u8> {
+        if size <= 0 {
+            return Err(anyhow!("Tried to read zero bytes from staging buffer"));
+        }
+        if self.readback_buffer.as_ref().map_or(true, |b| b.size < size) {
+            let buf = rd.buffer_create(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu)?;
+            buf.set_name("staging readback buffer");
+            self.readback_buffer = Some(buf);
+        }
+        let staging_buffer = self.readback_buffer.as_ref().unwrap();
+        rd.record(|dev, cmd| unsafe {
+            dev.cmd_copy_buffer(
+                cmd,
+                buffer.handle,
+                staging_buffer.handle,
+                &[vk::BufferCopy {
+                    src_offset: offset,
+                    dst_offset: 0,
+                    size,
+                }],
+            );
+        });
+        Ok(staging_buffer.alloc().unwrap().mapped_ptr().unwrap().as_ptr() as *mut u8)
     }
 
     pub fn write(&mut self, rd: &RenderingDevice, data: &[u8]) -> Option<(Buffer, u64, u64)> {
@@ -30,7 +64,10 @@ impl StagingBelt {
             i
         } else {
             assert!(size < self.chunk_size);
-            let buffer = rd.buffer_create(self.chunk_size.max(size), vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::CpuToGpu).unwrap();
+            let buffer = rd
+                .buffer_create(self.chunk_size.max(size), vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::CpuToGpu)
+                .unwrap();
+            buffer.set_name(format!("staging chunk {}", self.active_chunks.len()));
             self.active_chunks.push(StagingChunk { buffer, cursor: 0 });
             self.active_chunks.len() - 1
         };

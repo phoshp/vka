@@ -1,5 +1,7 @@
 use std::ffi::CStr;
 
+use ash::vk;
+use gpu_allocator::MemoryLocation;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 pub struct RenderingDeviceInfo<'a> {

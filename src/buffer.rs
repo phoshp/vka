@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::rc::Rc;
 
 use ash::vk;
@@ -24,6 +25,11 @@ impl Deref for Buffer {
     type Target = Handle<BufferImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+impl DerefMut for Buffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -73,7 +79,7 @@ impl RenderingDevice {
                     requirements: mem_reqs,
                     location,
                     linear: true,
-                    allocation_scheme: AllocationScheme::DedicatedBuffer(buffer),
+                    allocation_scheme: AllocationScheme::GpuAllocatorManaged
                 })
                 .unwrap();
             self.device.bind_buffer_memory(buffer, alloc.memory(), alloc.offset())?;

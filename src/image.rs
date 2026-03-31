@@ -3,6 +3,7 @@ use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::rc::Rc;
 
 use ash::vk;
@@ -30,6 +31,11 @@ impl Deref for Image {
     type Target = Handle<ImageImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+impl DerefMut for Image {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 

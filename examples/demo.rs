@@ -9,12 +9,13 @@ pub fn main() -> vka::VkaResult<()> {
     let rd = vka::RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
 
     let buffer = rd.buffer_uniform(16 * 1024)?;
+    buffer.set_name("demo uniform buffer");
     let image = rd.image_2d(vk::Format::R8G8B8A8_UNORM, 256, 256, 1, 1, vk::SampleCountFlags::TYPE_1, vk::ImageUsageFlags::SAMPLED)?;
     let img_view = rd.image_full_view(&image);
     let sampler = rd.sampler_nearest(vk::SamplerAddressMode::REPEAT);
 
     rd.acquire_swapchain_image();
-    rd.record(|dev, cmd, frame| unsafe {
+    rd.record(|dev, cmd| unsafe {
         rd.barrier_image(cmd, &image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         dev.cmd_clear_color_image(
             cmd,
@@ -26,5 +27,13 @@ pub fn main() -> vka::VkaResult<()> {
         rd.barrier_image(cmd, &image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
     });
     rd.submit()?;
-    rd.present()
+    rd.present()?;
+
+    rd.write_buffer(&buffer, &[1u8, 1u8, 1u8, 0u8, 0, 0], 0);
+    rd.submit_wait()?;
+
+    let mut read_data = [0; 6];
+    rd.read_buffer(&buffer, &mut read_data, 0); // this is implicitly immediate.
+    assert_eq!(read_data, [1, 1, 1, 0, 0, 0]);
+    Ok(())
 }
