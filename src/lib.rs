@@ -36,6 +36,7 @@ pub type VkaResult<T> = anyhow::Result<T>;
 
 pub static ENTRY: LazyLock<ash::Entry> = LazyLock::new(|| unsafe { ash::Entry::load().expect("Failed to load Vulkan library") });
 
+/// Holds indices for the different Vulkan queue families used by the device.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueFamilies {
     pub present: u32,
@@ -55,6 +56,7 @@ impl Default for QueueFamilies {
     }
 }
 
+/// Represents resources required for rendering a single frame in flight.
 pub struct Frame {
     pub cmd_pool: vk::CommandPool,
     front_cmd: Cell<vk::CommandBuffer>,
@@ -66,6 +68,7 @@ pub struct Frame {
     pub belt: RefCell<StagingBelt>,
 }
 
+/// The inner state of a Vulkan rendering device containing the instance, physical device, logical device, and other core resources.
 pub struct RenderingDeviceImpl {
     pub instance: ash::Instance,
     pub device: ash::Device,
@@ -104,6 +107,7 @@ impl Into<RenderingDevice> for Rc<RenderingDeviceImpl> {
     }
 }
 
+/// A reference-counted wrapper around `RenderingDeviceImpl`, providing convenient access to Vulkan operations.
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct RenderingDevice(Rc<RenderingDeviceImpl>);
@@ -116,6 +120,7 @@ impl Deref for RenderingDevice {
 }
 
 impl RenderingDevice {
+    /// Initializes a new Vulkan rendering device, instances, and necessary Queues/Allocators according to `RenderingDeviceInfo`.
     pub fn new(info: &RenderingDeviceInfo) -> VkaResult<Self> {
         unsafe {
             let vulkan_version = ENTRY.try_enumerate_instance_version()?.unwrap_or(vk::API_VERSION_1_0);
@@ -349,6 +354,7 @@ impl RenderingDevice {
         }
     }
 
+    /// Updates the swapchain surface configuration and recreates the swapchain.
     pub fn reconfigure_surface(&self, config: SurfaceConfig) {
         self.surface_config.set(config);
         self.recreate_swapchain();
@@ -369,10 +375,12 @@ impl RenderingDevice {
         }
     }
 
+    /// Gets the resources for the current frame.
     pub fn frame(&self) -> &Frame {
         &self.frames[self.frame_index.get()]
     }
 
+    /// Acquires the next available image from the swapchain for rendering. Recrates swapchain if suboptimal.
     pub fn acquire_swapchain_image(&self) -> Option<Image> {
         if let Some(swapchain) = self.swapchain.borrow().as_ref() {
             if self.suboptimal_swapchain.get() {
@@ -392,15 +400,18 @@ impl RenderingDevice {
         self.swapchain.borrow().as_ref().map(|s| s.images[self.image_index.get()].clone())
     }
 
+    /// Gets the current frame's command buffer where rendering commands should be recorded.
     pub fn get_cmd_buffer(&self) -> vk::CommandBuffer {
         self.frame().front_cmd.get()
     }
 
+    /// Records commands to the current frame's command buffer via a closure.
     pub fn record(&self, record_fn: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
         let cmd = self.get_cmd_buffer();
         record_fn(&self.device, cmd);
     }
 
+    /// Submits the current frame's command buffer to the graphics queue and advances to the next frame.
     pub fn submit(&self) -> VkaResult<()> {
         unsafe {
             let frame = self.frame();
@@ -435,17 +446,20 @@ impl RenderingDevice {
         }
     }
 
+    /// Blocks until the graphics queue goes idle.
     pub fn wait_queue(&self) -> VkaResult<()> {
         unsafe {
             Ok(self.device.queue_wait_idle(self.graphics_queue)?)
         }
     }
 
+    /// Submits the current frame and waits for it to complete.
     pub fn submit_wait(&self) -> VkaResult<()> {
         self.submit()?;
         self.wait_queue()
     }
 
+    /// Presents the last rendered frame to the swapchain.
     pub fn present(&self) -> VkaResult<()> {
         if let Some(swapchain) = self.swapchain.borrow().as_ref() {
             let suboptimal = unsafe {
@@ -640,6 +654,7 @@ impl Drop for RenderingDeviceImpl {
     }
 }
 
+/// Handles Vulkan debug callbacks and messenger.
 pub struct DebugUtils {
     pub instance: debug_utils::Instance,
     pub device: debug_utils::Device,

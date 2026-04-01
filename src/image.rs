@@ -73,6 +73,7 @@ pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
 }
 
 impl RenderingDevice {
+    /// Creates a 2D image with specified format, dimensions, mips, layers, samples, and usage.
     #[inline]
     pub fn image_2d(&self, format: vk::Format, width: u32, height: u32, levels: u32, layers: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> VkaResult<Image> {
         self.image_from_info(
@@ -90,6 +91,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a 3D image with specified dimensions and mip levels.
     #[inline]
     pub fn image_3d(&self, format: vk::Format, width: u32, height: u32, depth: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> VkaResult<Image> {
         self.image_from_info(
@@ -107,6 +109,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a Cube compatible image (typically 6 layers).
     #[inline]
     pub fn image_cube(&self, format: vk::Format, width: u32, height: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> VkaResult<Image> {
         self.image_from_info(
@@ -125,6 +128,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates an image and allocates dedicated GPU memory from a `vk::ImageCreateInfo`.
     pub fn image_from_info(&self, mut info: vk::ImageCreateInfo) -> VkaResult<Image> {
         unsafe {
             info.usage |= vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
@@ -180,6 +184,7 @@ impl RenderingDevice {
         ))
     }
 
+    /// Gets or creates a view encompassing the entire image (all mips and layers).
     pub fn image_full_view(&self, image: &Image) -> vk::ImageView {
         *image.full_view.get_or_init(|| {
             self.image_view_range(
@@ -192,6 +197,7 @@ impl RenderingDevice {
         })
     }
 
+    /// Gets or creates a view for a specific mip level and array layer.
     #[inline]
     pub fn image_view(&self, image: &Image, mip_level: u32, layer: u32) -> vk::ImageView {
         self.image_view_range(
@@ -205,6 +211,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Gets or creates a view covering a custom `vk::ImageSubresourceRange`.
     pub fn image_view_range(&self, image: &Image, range: vk::ImageSubresourceRange) -> vk::ImageView {
         self.image_view_create(
             image,
@@ -226,6 +233,7 @@ impl RenderingDevice {
         view
     }
 
+    /// Creates a generic Vulkan sampler.
     pub fn sampler_create(&self, info: vk::SamplerCreateInfo) -> Handle<vk::Sampler> {
         let value = unsafe { self.device.create_sampler(&info, None).unwrap() };
         Resource::new(self, value, None, |res, rd| unsafe {
@@ -233,6 +241,7 @@ impl RenderingDevice {
         })
     }
 
+    /// Creates a Sampler with nearest filtering for both min and mag.
     pub fn sampler_nearest(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
         self.sampler_create(
             vk::SamplerCreateInfo::default()
@@ -245,6 +254,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a Sampler with nearest mag and linear min filtering.
     pub fn sampler_nearest_linear(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
         self.sampler_create(
             vk::SamplerCreateInfo::default()
@@ -257,6 +267,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a Sampler with bilinear filtering (linear min/mag, nearest mipmap).
     pub fn sampler_bilinear(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
         self.sampler_create(
             vk::SamplerCreateInfo::default()
@@ -269,6 +280,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a Sampler with trilinear filtering (linear min/mag/mipmap).
     pub fn sampler_trilinear(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
         self.sampler_create(
             vk::SamplerCreateInfo::default()
@@ -281,6 +293,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a Sampler with anisotropic filtering enabled.
     pub fn sampler_anisotropic(&self, wrap_mode: vk::SamplerAddressMode, max_anisotropy: f32) -> Handle<vk::Sampler> {
         self.sampler_create(
             vk::SamplerCreateInfo::default()
@@ -295,6 +308,7 @@ impl RenderingDevice {
         )
     }
 
+    /// Creates a Sampler configured for shadow mapping (linear filtering, compare enable).
     pub fn sampler_shadow(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
         self.sampler_create(
             vk::SamplerCreateInfo::default()

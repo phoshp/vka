@@ -17,6 +17,7 @@ use crate::VkaResult;
 use crate::bytes_of;
 use crate::utils;
 
+/// A reference-counted wrapper around a Vulkan buffer resource.
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Buffer(Handle<BufferImpl>);
@@ -33,6 +34,7 @@ impl DerefMut for Buffer {
     }
 }
 
+/// Inner state of a Vulkan buffer, managing its handle, size, usage, and cached views.
 pub struct BufferImpl {
     pub handle: vk::Buffer,
     pub size: vk::DeviceSize,
@@ -41,26 +43,32 @@ pub struct BufferImpl {
 }
 
 impl RenderingDevice {
+    /// Creates a GPU-only uniform buffer.
     pub fn buffer_uniform(&self, size: u64) -> VkaResult<Buffer> {
         self.buffer_create(size, vk::BufferUsageFlags::UNIFORM_BUFFER, MemoryLocation::GpuOnly)
     }
 
+    /// Creates a GPU-only storage buffer.
     pub fn buffer_storage(&self, size: u64) -> VkaResult<Buffer> {
         self.buffer_create(size, vk::BufferUsageFlags::STORAGE_BUFFER, MemoryLocation::GpuOnly)
     }
 
+    /// Creates a GPU-only index buffer.
     pub fn buffer_index(&self, size: u64) -> VkaResult<Buffer> {
         self.buffer_create(size, vk::BufferUsageFlags::INDEX_BUFFER, MemoryLocation::GpuOnly)
     }
 
+    /// Creates a GPU-only vertex buffer.
     pub fn buffer_vertex(&self, size: u64) -> VkaResult<Buffer> {
         self.buffer_create(size, vk::BufferUsageFlags::VERTEX_BUFFER, MemoryLocation::GpuOnly)
     }
 
+    /// Creates a GPU-only indirect buffer.
     pub fn buffer_indirect(&self, size: u64) -> VkaResult<Buffer> {
         self.buffer_create(size, vk::BufferUsageFlags::INDIRECT_BUFFER, MemoryLocation::GpuOnly)
     }
 
+    /// Allocates and creates a buffer with specific usage flags and memory location.
     pub fn buffer_create(&self, size: u64, usage: vk::BufferUsageFlags, location: MemoryLocation) -> VkaResult<Buffer> {
         self.buffer_from_info(vk::BufferCreateInfo::default().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE), location)
     }
@@ -106,6 +114,8 @@ impl RenderingDevice {
         ))
     }
 
+    /// Creates a buffer view for a specific region of the given buffer.
+    /// Views are cached internally by the buffer to avoid redundant creations.
     pub fn buffer_view(&self, buffer: &Buffer, format: vk::Format, offset: u64, range: u64) -> VkaResult<vk::BufferView> {
         self.buffer_view_with(
             buffer,

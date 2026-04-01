@@ -16,6 +16,8 @@ use crate::image::Image;
 /// It holds the resource value, its allocation (if any), and a weak reference to the rendering device for cleanup purposes.
 pub type Handle<T> = Rc<Resource<T>>;
 
+/// The inner wrapper for a GPU resource. Manages the lifecycle of an allocated value
+/// and automatically invokes a cleanup closure, destroying it upon dropping.
 pub struct Resource<T> {
     pub value: T,
     pub alloc: Option<Allocation>,
@@ -32,6 +34,7 @@ impl<T> Deref for Resource<T> {
 }
 
 impl<T> Resource<T> {
+    /// Spawns a new reference-counted handling mapping `value`, an allocation, and its destructor closure.
     pub fn new(rd: &RenderingDevice, value: T, alloc: Option<Allocation>, dtor: impl FnMut(&mut Resource<T>, &RenderingDeviceImpl) + 'static) -> Handle<T> {
         let device = Rc::downgrade(&rd.0);
         Rc::new(Self {
@@ -63,6 +66,7 @@ impl<T> Resource<T> {
         self.alloc.as_ref()
     }
 
+    /// Immediately invokes the destructor and frees the resource and memory.
     pub fn destroy(&mut self, rd: &RenderingDeviceImpl) {
         let res_name = self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()).to_string();
         log::debug!("Dropping resource {}", res_name);
@@ -88,6 +92,7 @@ impl<T> Drop for Resource<T> {
 }
 
 impl RenderingDevice {
+    /// Records a generic global memory pipeline barrier.
     pub fn barrier(&self, cmd: vk::CommandBuffer, src_stages: vk::PipelineStageFlags, dst_stages: vk::PipelineStageFlags) {
         unsafe {
             // most of the driver implementations filter access flags based on the pipeline stages.
@@ -100,6 +105,7 @@ impl RenderingDevice {
         }
     }
 
+    /// Transitions an image to a new layout and records the corresponding image memory pipeline barrier.
     pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, new_layout: vk::ImageLayout) -> vk::ImageLayout {
         let prev_layout = image.layout.get();
         self.barrier_image_from(cmd, image.handle, image.aspect, prev_layout, new_layout);
