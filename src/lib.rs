@@ -380,7 +380,7 @@ impl RenderingDevice {
         &self.frames[self.frame_index.get()]
     }
 
-    /// Acquires the next available image from the swapchain for rendering. Recrates swapchain if suboptimal.
+    /// Acquires the next available image from the swapchain for rendering. Recreates swapchain if suboptimal.
     pub fn acquire_swapchain_image(&self) -> Option<Image> {
         if let Some(swapchain) = self.swapchain.borrow().as_ref() {
             if self.suboptimal_swapchain.get() {

@@ -16,8 +16,6 @@ use crate::image::Image;
 /// It holds the resource value, its allocation (if any), and a weak reference to the rendering device for cleanup purposes.
 pub type Handle<T> = Rc<Resource<T>>;
 
-/// The inner wrapper for a GPU resource. Manages the lifecycle of an allocated value
-/// and automatically invokes a cleanup closure, destroying it upon dropping.
 pub struct Resource<T> {
     pub value: T,
     pub alloc: Option<Allocation>,
