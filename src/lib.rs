@@ -136,25 +136,31 @@ impl RenderingDevice {
                 .application_version(vk::make_api_version(0, 1, 0, 0))
                 .api_version(vulkan_version);
 
-            let mut enabled_instance_exts = Vec::new();
-            enabled_instance_exts.push(vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME);
+            let mut enabled_layers = Vec::new();
+            let mut enabled_instance_exts = vec![vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME];
 
             if let Some(surface) = info.surface {
                 enabled_instance_exts.extend(ash_window::enumerate_required_extensions(surface.0).unwrap().iter().map(|&x| CStr::from_ptr(x)));
             }
-            let mut enabled_layers = Vec::new();
             let validation_layers_enabled = info.gpu_validation && available_layers.contains(&c"VK_LAYER_KHRONOS_validation") && available_exts.contains(&vk::EXT_DEBUG_UTILS_NAME);
 
             if validation_layers_enabled {
                 enabled_layers.push(c"VK_LAYER_KHRONOS_validation");
                 enabled_instance_exts.push(vk::EXT_DEBUG_UTILS_NAME);
             }
+            if cfg!(any(target_os = "macos", target_os = "ios")) {
+                enabled_instance_exts.push(vk::KHR_PORTABILITY_ENUMERATION_NAME)
+            }
+
             let inst_layers_ptr = enabled_layers.iter().map(|x| x.as_ptr()).collect_vec();
             let inst_exts_ptr = enabled_instance_exts.iter().map(|x| x.as_ptr()).collect_vec();
-            let instance_info = vk::InstanceCreateInfo::default()
+            let mut instance_info = vk::InstanceCreateInfo::default()
                 .application_info(&app_info)
                 .enabled_layer_names(&inst_layers_ptr)
                 .enabled_extension_names(&inst_exts_ptr);
+            if cfg!(any(target_os = "macos", target_os = "ios")) {
+                instance_info.flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+            }
 
             log::info!("Creating vulkan instance:");
             log::info!("App name: {}", info.app_name.to_str()?);
@@ -164,6 +170,9 @@ impl RenderingDevice {
             let instance = ENTRY.create_instance(&instance_info, None)?;
 
             let mut enabled_device_exts = vec![vk::KHR_DYNAMIC_RENDERING_NAME];
+            if cfg!(any(target_os = "macos", target_os = "ios")) {
+                enabled_device_exts.push(vk::KHR_PORTABILITY_SUBSET_NAME);
+            }
 
             let found_devices = instance
                 .enumerate_physical_devices()?
