@@ -123,16 +123,12 @@ impl RenderingDevice {
 
     /// Transitions an image to a new layout and records the corresponding image memory pipeline barrier.
     pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, mut new_layout: vk::ImageLayout) -> vk::ImageLayout {
-        // Transitioning to undefined is not valid, so we treat it as general layout
+        // Transitioning to undefined is not valid
         // also might be triggered by the first image write operations due to how we handle it.
-        if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
-            if image.usage.contains(vk::ImageUsageFlags::STORAGE) {
-                new_layout = vk::ImageLayout::GENERAL // since this is a must for storage images.
-            } else {
-                new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-            }
-        }
         let old_layout = image.layout.get();
+        if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
+            new_layout = old_layout; // so, just skip layout transition, only a memory barrier.
+        }
         self.barrier_image_from(cmd, image.handle, image.aspect, old_layout, new_layout);
         image.layout.set(new_layout);
         old_layout
@@ -141,7 +137,7 @@ impl RenderingDevice {
     pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) -> vk::ImageLayout {
         unsafe {
             if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
-                new_layout = vk::ImageLayout::GENERAL; // we have no choice
+                new_layout = old_layout;
             }
             let (src_stages, src_access) = match old_layout {
                 vk::ImageLayout::UNDEFINED | vk::ImageLayout::PREINITIALIZED => (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty()),
