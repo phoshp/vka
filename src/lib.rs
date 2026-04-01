@@ -478,7 +478,6 @@ impl RenderingDevice {
     pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) {
         if let Some((staging_buf, cursor, size)) = self.frame().belt.borrow_mut().write(self, bytes_of(data)) {
             self.record(|dev, cmd| unsafe {
-                self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
                 dev.cmd_copy_buffer(
                     cmd,
                     staging_buf.handle,

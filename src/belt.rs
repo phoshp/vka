@@ -38,18 +38,8 @@ impl StagingBelt {
             self.readback_buffer = Some(buf);
         }
         let staging_buffer = self.readback_buffer.as_ref().unwrap();
-        rd.record(|dev, cmd| unsafe {
-            dev.cmd_copy_buffer(
-                cmd,
-                buffer.handle,
-                staging_buffer.handle,
-                &[vk::BufferCopy {
-                    src_offset: offset,
-                    dst_offset: 0,
-                    size,
-                }],
-            );
-        });
+        rd.copy_buffer(buffer, staging_buffer, &[vk::BufferCopy { src_offset: offset, dst_offset: 0, size }]);
+
         Ok(staging_buffer.alloc().unwrap().mapped_ptr().unwrap().as_ptr() as *mut u8)
     }
 
