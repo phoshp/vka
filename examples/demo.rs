@@ -4,7 +4,7 @@ use ash::vk;
 use vka;
 use vka::RenderingDeviceInfo;
 
-pub fn main() -> vka::VkaResult<()> {
+pub fn main() -> vka::Result<()> {
     env_logger::init();
     let rd = vka::RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
 

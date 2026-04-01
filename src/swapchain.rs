@@ -5,7 +5,7 @@ use itertools::Itertools;
 use crate::AsExtent3D;
 use crate::Image;
 use crate::RenderingDevice;
-use crate::VkaResult;
+use crate::Result;
 
 /// Encapsulates the Vulkan swapchain and its associated images for presentation to a window surface.
 pub struct Swapchain {
@@ -32,7 +32,7 @@ fn present_mode_str(mode: vk::PresentModeKHR) -> &'static str {
 }
 
 /// Factory function to create or recreate a swapchain based on the current surface configuration.
-pub fn make_swapchain(rd: &RenderingDevice, old_swapchain: Option<vk::SwapchainKHR>) -> VkaResult<Swapchain> {
+pub fn make_swapchain(rd: &RenderingDevice, old_swapchain: Option<vk::SwapchainKHR>) -> Result<Swapchain> {
     unsafe {
         let device = &rd.device;
         let instance = &rd.instance;

@@ -32,7 +32,7 @@ pub use gpu_allocator::vulkan::AllocationScheme;
 
 use crate::belt::StagingBelt;
 
-pub type VkaResult<T> = anyhow::Result<T>;
+pub type Result<T> = anyhow::Result<T>;
 
 pub static ENTRY: LazyLock<ash::Entry> = LazyLock::new(|| unsafe { ash::Entry::load().expect("Failed to load Vulkan library") });
 
@@ -121,7 +121,7 @@ impl Deref for RenderingDevice {
 
 impl RenderingDevice {
     /// Initializes a new Vulkan rendering device, instances, and necessary Queues/Allocators according to `RenderingDeviceInfo`.
-    pub fn new(info: &RenderingDeviceInfo) -> VkaResult<Self> {
+    pub fn new(info: &RenderingDeviceInfo) -> Result<Self> {
         unsafe {
             let vulkan_version = ENTRY.try_enumerate_instance_version()?.unwrap_or(vk::API_VERSION_1_0);
             let enum_layer_props = ENTRY.enumerate_instance_layer_properties()?;
@@ -350,7 +350,7 @@ impl RenderingDevice {
             }));
             rd.recreate_swapchain();
 
-            VkaResult::Ok(rd)
+            Result::Ok(rd)
         }
     }
 
@@ -412,7 +412,7 @@ impl RenderingDevice {
     }
 
     /// Submits the current frame's command buffer to the graphics queue and advances to the next frame.
-    pub fn submit(&self) -> VkaResult<()> {
+    pub fn submit(&self) -> Result<()> {
         unsafe {
             let frame = self.frame();
 
@@ -442,25 +442,25 @@ impl RenderingDevice {
             )?;
 
             self.frame_index.set((self.frame_index.get() + 1) % self.frames.len());
-            VkaResult::Ok(())
+            Result::Ok(())
         }
     }
 
     /// Blocks until the graphics queue goes idle.
-    pub fn wait_queue(&self) -> VkaResult<()> {
+    pub fn wait_queue(&self) -> Result<()> {
         unsafe {
             Ok(self.device.queue_wait_idle(self.graphics_queue)?)
         }
     }
 
     /// Submits the current frame and waits for it to complete.
-    pub fn submit_wait(&self) -> VkaResult<()> {
+    pub fn submit_wait(&self) -> Result<()> {
         self.submit()?;
         self.wait_queue()
     }
 
     /// Presents the last rendered frame to the swapchain.
-    pub fn present(&self) -> VkaResult<()> {
+    pub fn present(&self) -> Result<()> {
         if let Some(swapchain) = self.swapchain.borrow().as_ref() {
             let suboptimal = unsafe {
                 swapchain
@@ -476,17 +476,17 @@ impl RenderingDevice {
             };
             self.suboptimal_swapchain.set(self.suboptimal_swapchain.get() || suboptimal);
         }
-        VkaResult::Ok(())
+        Result::Ok(())
     }
 
-    pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> VkaResult<()> {
+    pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> Result<()> {
         let ptr = {
             self.frame().belt.borrow_mut().read(self, buffer, offset, data.len() as u64)?
         };
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         self.submit_wait()?;
         data.copy_from_slice(read);
-        VkaResult::Ok(())
+        Result::Ok(())
     }
 
     pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) {
@@ -661,7 +661,7 @@ pub struct DebugUtils {
     pub messenger: vk::DebugUtilsMessengerEXT,
 }
 
-pub fn make_debug_utils(instance: &ash::Instance, device: &ash::Device) -> VkaResult<DebugUtils> {
+pub fn make_debug_utils(instance: &ash::Instance, device: &ash::Device) -> Result<DebugUtils> {
     unsafe {
         let debug_inst = debug_utils::Instance::new(&ENTRY, instance);
         let debug_dev = debug_utils::Device::new(instance, device);
@@ -672,7 +672,7 @@ pub fn make_debug_utils(instance: &ash::Instance, device: &ash::Device) -> VkaRe
                 .pfn_user_callback(Some(self::vulkan_debug_callback)),
             None,
         )?;
-        VkaResult::Ok(DebugUtils {
+        Result::Ok(DebugUtils {
             instance: debug_inst,
             device: debug_dev,
             messenger,

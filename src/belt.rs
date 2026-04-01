@@ -8,7 +8,7 @@ use gpu_allocator::MemoryLocation;
 
 use crate::Buffer;
 use crate::RenderingDevice;
-use crate::VkaResult;
+use crate::Result;
 use crate::utils;
 
 pub const COPY_ALIGNMENT: u64 = 4;
@@ -28,7 +28,7 @@ impl StagingBelt {
         }
     }
 
-    pub fn read(&mut self, rd: &RenderingDevice, buffer: &Buffer, offset: u64, size: u64) -> VkaResult<*mut u8> {
+    pub fn read(&mut self, rd: &RenderingDevice, buffer: &Buffer, offset: u64, size: u64) -> Result<*mut u8> {
         if size <= 0 {
             return Err(anyhow!("Tried to read zero bytes from staging buffer"));
         }
@@ -40,7 +40,7 @@ impl StagingBelt {
         let staging_buffer = self.readback_buffer.as_ref().unwrap();
         rd.copy_buffer(buffer, staging_buffer, &[vk::BufferCopy { src_offset: offset, dst_offset: 0, size }]);
 
-        Ok(staging_buffer.alloc().unwrap().mapped_ptr().unwrap().as_ptr() as *mut u8)
+        Ok(staging_buffer.alloc().mapped_ptr().unwrap().as_ptr() as *mut u8)
     }
 
     pub fn write(&mut self, rd: &RenderingDevice, data: &[u8]) -> Option<(Buffer, u64, u64)> {
@@ -64,7 +64,7 @@ impl StagingBelt {
 
         let chunk = &mut self.active_chunks[index];
         let offset = chunk.allocate(size);
-        let ptr = chunk.buffer.alloc().unwrap().mapped_ptr().ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED).unwrap().as_ptr() as *mut u8;
+        let ptr = chunk.buffer.alloc().mapped_ptr().ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED).unwrap().as_ptr() as *mut u8;
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), size as usize);
         }

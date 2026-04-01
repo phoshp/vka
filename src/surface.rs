@@ -3,7 +3,7 @@ use raw_window_handle::RawDisplayHandle;
 use raw_window_handle::RawWindowHandle;
 
 use crate::ENTRY;
-use crate::VkaResult;
+use crate::Result;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SurfaceConfig {
@@ -27,11 +27,11 @@ pub struct Surface {
     pub handle: vk::SurfaceKHR,
 }
 
-pub fn make_surface(instance: &ash::Instance, rdh: RawDisplayHandle, rwh: RawWindowHandle) -> VkaResult<Surface> {
+pub fn make_surface(instance: &ash::Instance, rdh: RawDisplayHandle, rwh: RawWindowHandle) -> Result<Surface> {
     unsafe {
         log::info!("Creating the surface");
         let surface_khr = ash::khr::surface::Instance::new(&ENTRY, &instance);
         let surface = ash_window::create_surface(&ENTRY, &instance, rdh, rwh, None)?;
-        VkaResult::Ok(Surface { instance: surface_khr, handle: surface })
+        Result::Ok(Surface { instance: surface_khr, handle: surface })
     }
 }

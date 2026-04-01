@@ -15,7 +15,7 @@ use gpu_allocator::vulkan::AllocationScheme;
 use crate::Handle;
 use crate::RenderingDevice;
 use crate::Resource;
-use crate::VkaResult;
+use crate::Result;
 use crate::bytes_of;
 use crate::utils;
 
@@ -23,7 +23,7 @@ use crate::utils;
 ///
 /// The `Image` struct holds the Vulkan image handle, its format, extent, usage, aspect mask, sample count, and layout.
 /// It also caches the image views to avoid redundant Vulkan calls.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Image(Handle<ImageImpl>);
 
@@ -40,6 +40,7 @@ impl DerefMut for Image {
 }
 
 /// The internal implementation of the `Image` resource, containing the Vulkan image handle and related metadata.
+#[derive(Debug)]
 pub struct ImageImpl {
     pub handle: vk::Image,
     pub format: vk::Format,
@@ -75,7 +76,7 @@ pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
 impl RenderingDevice {
     /// Creates a 2D image with specified format, dimensions, mips, layers, samples, and usage.
     #[inline]
-    pub fn image_2d(&self, format: vk::Format, width: u32, height: u32, levels: u32, layers: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> VkaResult<Image> {
+    pub fn image_2d(&self, format: vk::Format, width: u32, height: u32, levels: u32, layers: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Image> {
         self.image_from_info(
             vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
@@ -88,12 +89,13 @@ impl RenderingDevice {
                 .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
+            MemoryLocation::GpuOnly,
         )
     }
 
     /// Creates a 3D image with specified dimensions and mip levels.
     #[inline]
-    pub fn image_3d(&self, format: vk::Format, width: u32, height: u32, depth: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> VkaResult<Image> {
+    pub fn image_3d(&self, format: vk::Format, width: u32, height: u32, depth: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Image> {
         self.image_from_info(
             vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_3D)
@@ -106,12 +108,13 @@ impl RenderingDevice {
                 .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
+            MemoryLocation::GpuOnly,
         )
     }
 
     /// Creates a Cube compatible image (typically 6 layers).
     #[inline]
-    pub fn image_cube(&self, format: vk::Format, width: u32, height: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> VkaResult<Image> {
+    pub fn image_cube(&self, format: vk::Format, width: u32, height: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Image> {
         self.image_from_info(
             vk::ImageCreateInfo::default()
                 .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
@@ -125,11 +128,12 @@ impl RenderingDevice {
                 .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
+            MemoryLocation::GpuOnly,
         )
     }
 
-    /// Creates an image and allocates dedicated GPU memory from a `vk::ImageCreateInfo`.
-    pub fn image_from_info(&self, mut info: vk::ImageCreateInfo) -> VkaResult<Image> {
+    /// Creates an image and allocate memory for it from a `vk::ImageCreateInfo` and `MemoryLocation`.
+    pub fn image_from_info(&self, mut info: vk::ImageCreateInfo, location: MemoryLocation) -> Result<Image> {
         unsafe {
             info.usage |= vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
             let image = self.device.create_image(&info, None)?;
@@ -141,13 +145,13 @@ impl RenderingDevice {
                 .allocate(&AllocationCreateDesc {
                     name: "vka_image",
                     requirements: mem_reqs,
-                    location: MemoryLocation::GpuOnly,
-                    linear: false,
-                    allocation_scheme: AllocationScheme::DedicatedImage(image),
+                    location,
+                    linear: info.tiling == vk::ImageTiling::LINEAR,
+                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
                 })
                 .unwrap();
             self.device.bind_image_memory(image, alloc.memory(), alloc.offset())?;
-            VkaResult::Ok(self.image_from_raw(image, info.format, info.extent, info.samples, info.usage, Some(alloc)))
+            Result::Ok(self.image_from_raw(image, info.format, info.extent, info.samples, info.usage, Some(alloc)))
         }
     }
 

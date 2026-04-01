@@ -1,4 +1,7 @@
 use std::cell::OnceCell;
+use std::fmt;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ops::Range;
@@ -18,7 +21,7 @@ pub type Handle<T> = Rc<Resource<T>>;
 
 pub struct Resource<T> {
     pub value: T,
-    pub alloc: Option<Allocation>,
+    pub alloc: Allocation,
     pub device: Weak<RenderingDeviceImpl>,
     name: OnceCell<String>,
     dtor: Option<Box<dyn FnMut(&mut Self, &RenderingDeviceImpl)>>,
@@ -32,12 +35,12 @@ impl<T> Deref for Resource<T> {
 }
 
 impl<T> Resource<T> {
-    /// Spawns a new reference-counted handling mapping `value`, an allocation, and its destructor closure.
+    /// Spawns a new ref-counted handling mapping `value`, an allocation, and its destructor closure.
     pub fn new(rd: &RenderingDevice, value: T, alloc: Option<Allocation>, dtor: impl FnMut(&mut Resource<T>, &RenderingDeviceImpl) + 'static) -> Handle<T> {
         let device = Rc::downgrade(&rd.0);
         Rc::new(Self {
             value,
-            alloc,
+            alloc: alloc.unwrap_or(Allocation::default()),
             device,
             name: OnceCell::new(),
             dtor: Some(Box::new(dtor)),
@@ -60,8 +63,15 @@ impl<T> Resource<T> {
         self.device.upgrade().map(RenderingDevice)
     }
 
-    pub fn alloc(&self) -> Option<&Allocation> {
-        self.alloc.as_ref()
+    pub fn alloc(&self) -> &Allocation {
+        &self.alloc
+    }
+
+    /// Returns a mutable slice to the mapped memory if the resource is host-visible, or None otherwise.
+    pub fn mapped_mut(&self) -> Option<&mut [u8]> {
+        self.alloc
+            .mapped_ptr()
+            .map(|ptr| unsafe { std::slice::from_raw_parts_mut(ptr.cast().as_ptr(), self.alloc.size() as usize) })
     }
 
     /// Immediately invokes the destructor and frees the resource and memory.
@@ -69,13 +79,15 @@ impl<T> Resource<T> {
         let res_name = self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()).to_string();
         log::debug!("Dropping resource {}", res_name);
         // hmm, not the best way, maybe we can use deferred cleanup.
-        unsafe { rd.device.queue_wait_idle(rd.graphics_queue).unwrap(); }
+        unsafe {
+            rd.device.queue_wait_idle(rd.graphics_queue).unwrap();
+        }
 
-        let alloc = self.alloc.take();
+        let alloc = std::mem::take(&mut self.alloc);
         if let Some(mut dtor) = self.dtor.take() {
             dtor(self, &rd);
         }
-        if let Some(alloc) = alloc {
+        if !alloc.is_null() {
             rd.allocator.lock().unwrap().free(alloc);
         }
     }
@@ -86,6 +98,12 @@ impl<T> Drop for Resource<T> {
         if let Some(rd) = self.device.upgrade() {
             self.destroy(&rd);
         }
+    }
+}
+
+impl<T: Debug> fmt::Debug for Resource<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Resource").field("handle", &self.value).field("name", &self.get_name()).finish()
     }
 }
 
@@ -104,8 +122,11 @@ impl RenderingDevice {
     }
 
     /// Transitions an image to a new layout and records the corresponding image memory pipeline barrier.
-    pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, new_layout: vk::ImageLayout) -> vk::ImageLayout {
+    pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, mut new_layout: vk::ImageLayout) -> vk::ImageLayout {
         let prev_layout = image.layout.get();
+        if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
+            new_layout = vk::ImageLayout::GENERAL;
+        }
         self.barrier_image_from(cmd, image.handle, image.aspect, prev_layout, new_layout);
         image.layout.set(new_layout);
         prev_layout
@@ -113,6 +134,10 @@ impl RenderingDevice {
 
     pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
         unsafe {
+            if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
+                new_layout = vk::ImageLayout::GENERAL; // Transitioning to undefined is not valid, so we treat it as general layout
+            }
+
             let (src_stages, src_access) = match old_layout {
                 vk::ImageLayout::UNDEFINED | vk::ImageLayout::PREINITIALIZED => (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty()),
                 vk::ImageLayout::GENERAL => (vk::PipelineStageFlags::ALL_COMMANDS, vk::AccessFlags::MEMORY_WRITE),
@@ -124,10 +149,6 @@ impl RenderingDevice {
                 vk::ImageLayout::PRESENT_SRC_KHR => (vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags::empty()),
                 _ => (vk::PipelineStageFlags::ALL_COMMANDS, vk::AccessFlags::MEMORY_WRITE),
             };
-
-            if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
-                new_layout = vk::ImageLayout::GENERAL; // Transitioning to undefined is not valid, so we treat it as general layout
-            }
 
             let (dst_stages, dst_access) = match new_layout {
                 vk::ImageLayout::GENERAL => (vk::PipelineStageFlags::ALL_COMMANDS, vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE),
