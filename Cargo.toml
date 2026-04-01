@@ -2,6 +2,11 @@
 name = "vka"
 version = "0.0.0"
 edition = "2024"
+description = "A minimal vulkan wrapper"
+license = "MIT"
+documentation = "https://docs.rs/vka"
+homepage = "https://github.com/phoshp/vka"
+repository = "https://github.com/phoshp/vka"
 
 [dependencies]
 anyhow = "1.0.102"
