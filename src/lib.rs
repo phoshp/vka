@@ -554,6 +554,54 @@ impl RenderingDevice {
             self.barrier_image(cmd, dst_img, prev2);
         });
     }
+
+    pub fn copy_buffer_image(&self, src_buf: &Buffer, dst_img: &Image, regions: &[vk::BufferImageCopy]) {
+        self.record(|dev, cmd| unsafe {
+            self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            let prev = self.barrier_image(cmd, dst_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            dev.cmd_copy_buffer_to_image(
+                cmd,
+                src_buf.handle,
+                dst_img.handle,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                regions,
+            );
+            self.barrier_image(cmd, dst_img, prev);
+            self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+    }
+
+    pub fn copy_image_buffer(&self, src_img: &Image, dst_buf: &Buffer, regions: &[vk::BufferImageCopy]) {
+        self.record(|dev, cmd| unsafe {
+            self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            let prev = self.barrier_image(cmd, src_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            dev.cmd_copy_image_to_buffer(
+                cmd,
+                src_img.handle,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                dst_buf.handle,
+                regions,
+            );
+            self.barrier_image(cmd, src_img, prev);
+            self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+    }
+
+    pub fn fill_buffer(&self, buffer: &Buffer, clear_value: u32, offset: u64, size: u64) {
+        self.record(|dev, cmd| unsafe {
+            self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            dev.cmd_fill_buffer(cmd, buffer.handle, offset, size, clear_value);
+            self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+    }
+
+    pub fn clear_color_image(&self, image: &Image, color: vk::ClearColorValue, range: vk::ImageSubresourceRange) {
+        self.record(|dev, cmd| unsafe {
+            let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            dev.cmd_clear_color_image(cmd, image.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &color, &[range]);
+            self.barrier_image(cmd, image, prev);
+        });
+    }
 }
 
 impl Drop for RenderingDeviceImpl {
