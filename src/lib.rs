@@ -448,9 +448,7 @@ impl RenderingDevice {
 
     /// Blocks until the graphics queue goes idle.
     pub fn wait_queue(&self) -> Result<()> {
-        unsafe {
-            Ok(self.device.queue_wait_idle(self.graphics_queue)?)
-        }
+        unsafe { Ok(self.device.queue_wait_idle(self.graphics_queue)?) }
     }
 
     /// Submits the current frame and waits for it to complete.
@@ -480,9 +478,7 @@ impl RenderingDevice {
     }
 
     pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> Result<()> {
-        let ptr = {
-            self.frame().belt.borrow_mut().read(self, buffer, offset, data.len() as u64)?
-        };
+        let ptr = { self.frame().belt.borrow_mut().read(self, buffer, offset, data.len() as u64)? };
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         self.submit_wait()?;
         data.copy_from_slice(read);
@@ -538,7 +534,11 @@ impl RenderingDevice {
             vk::Offset3D::default(),
             image.extent,
             vk::ImageSubresourceLayers::default().aspect_mask(image.aspect).layer_count(1),
-            Some(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            Some(if image.usage.contains(vk::ImageUsageFlags::STORAGE) {
+                vk::ImageLayout::GENERAL
+            } else {
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            }),
         )
     }
 
@@ -573,13 +573,7 @@ impl RenderingDevice {
         self.record(|dev, cmd| unsafe {
             self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
             let prev = self.barrier_image(cmd, dst_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            dev.cmd_copy_buffer_to_image(
-                cmd,
-                src_buf.handle,
-                dst_img.handle,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                regions,
-            );
+            dev.cmd_copy_buffer_to_image(cmd, src_buf.handle, dst_img.handle, vk::ImageLayout::TRANSFER_DST_OPTIMAL, regions);
             self.barrier_image(cmd, dst_img, prev);
             self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
         });
@@ -589,13 +583,7 @@ impl RenderingDevice {
         self.record(|dev, cmd| unsafe {
             self.barrier(cmd, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
             let prev = self.barrier_image(cmd, src_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-            dev.cmd_copy_image_to_buffer(
-                cmd,
-                src_img.handle,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                dst_buf.handle,
-                regions,
-            );
+            dev.cmd_copy_image_to_buffer(cmd, src_img.handle, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, dst_buf.handle, regions);
             self.barrier_image(cmd, src_img, prev);
             self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
         });
