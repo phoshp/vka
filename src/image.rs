@@ -13,6 +13,7 @@ use gpu_allocator::vulkan::AllocationCreateDesc;
 use gpu_allocator::vulkan::AllocationScheme;
 
 use crate::Handle;
+use crate::ImageDesc;
 use crate::RenderingDevice;
 use crate::Resource;
 use crate::Result;
@@ -74,61 +75,24 @@ pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
 }
 
 impl RenderingDevice {
-    /// Creates a 2D image with specified format, dimensions, mips, layers, samples, and usage.
-    #[inline]
-    pub fn image_2d(&self, format: vk::Format, width: u32, height: u32, levels: u32, layers: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Image> {
+    /// Creates an image based on the provided description, allocating memory and binding it.
+    pub fn image_create(&self, desc: &ImageDesc) -> Result<Image> {
         self.image_from_info(
             vk::ImageCreateInfo::default()
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(format)
-                .extent(vk::Extent3D::default().width(width).height(height).depth(1))
-                .mip_levels(levels)
-                .array_layers(layers)
-                .samples(samples)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(usage)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .initial_layout(vk::ImageLayout::UNDEFINED),
-            MemoryLocation::GpuOnly,
-        )
-    }
-
-    /// Creates a 3D image with specified dimensions and mip levels.
-    #[inline]
-    pub fn image_3d(&self, format: vk::Format, width: u32, height: u32, depth: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Image> {
-        self.image_from_info(
-            vk::ImageCreateInfo::default()
-                .image_type(vk::ImageType::TYPE_3D)
-                .format(format)
-                .extent(vk::Extent3D::default().width(width).height(height).depth(depth))
-                .mip_levels(levels)
-                .array_layers(1)
-                .samples(samples)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(usage)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .initial_layout(vk::ImageLayout::UNDEFINED),
-            MemoryLocation::GpuOnly,
-        )
-    }
-
-    /// Creates a Cube compatible image (typically 6 layers).
-    #[inline]
-    pub fn image_cube(&self, format: vk::Format, width: u32, height: u32, levels: u32, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Image> {
-        self.image_from_info(
-            vk::ImageCreateInfo::default()
-                .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(format)
-                .extent(vk::Extent3D::default().width(width).height(height).depth(1))
-                .mip_levels(levels)
-                .array_layers(6)
-                .samples(samples)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(usage)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .initial_layout(vk::ImageLayout::UNDEFINED),
-            MemoryLocation::GpuOnly,
+                .image_type(if desc.depth == 1 { vk::ImageType::TYPE_2D } else { vk::ImageType::TYPE_3D })
+                .format(desc.format)
+                .extent(vk::Extent3D {
+                    width: desc.width,
+                    height: desc.height,
+                    depth: desc.depth,
+                })
+                .mip_levels(desc.mip_levels)
+                .array_layers(desc.array_layers)
+                .samples(vk::SampleCountFlags::from_raw(desc.samples))
+                .tiling(desc.tiling)
+                .usage(desc.usage)
+                .flags(desc.flags),
+            desc.location,
         )
     }
 

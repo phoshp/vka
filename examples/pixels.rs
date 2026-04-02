@@ -5,19 +5,11 @@ pub use vka::*;
 pub fn main() -> vka::Result<()> {
     env_logger::init();
     let rd = RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
-    let pixels = rd.image_from_info(
-        vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_UNORM)
-            .extent(vk::Extent3D { width: 1024, height: 1024, depth: 1 })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
+    let pixels = rd.image_create(
+        &ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 1024, 1024)
             .tiling(vk::ImageTiling::LINEAR)
             .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE),
-        vka::MemoryLocation::CpuToGpu,
+            .location(MemoryLocation::CpuToGpu)
     )?;
     pixels.set_name("pixels buffer image");
 

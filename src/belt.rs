@@ -7,6 +7,7 @@ use ash::vk;
 use gpu_allocator::MemoryLocation;
 
 use crate::Buffer;
+use crate::BufferDesc;
 use crate::RenderingDevice;
 use crate::Result;
 use crate::utils;
@@ -33,12 +34,20 @@ impl StagingBelt {
             return Err(anyhow!("Tried to read zero bytes from staging buffer"));
         }
         if self.readback_buffer.as_ref().map_or(true, |b| b.size < size) {
-            let buf = rd.buffer_create(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu)?;
+            let buf = rd.buffer_create(&BufferDesc::new(size).location(MemoryLocation::GpuToCpu))?;
             buf.set_name("staging readback buffer");
             self.readback_buffer = Some(buf);
         }
         let staging_buffer = self.readback_buffer.as_ref().unwrap();
-        rd.copy_buffer(buffer, staging_buffer, &[vk::BufferCopy { src_offset: offset, dst_offset: 0, size }]);
+        rd.copy_buffer(
+            buffer,
+            staging_buffer,
+            &[vk::BufferCopy {
+                src_offset: offset,
+                dst_offset: 0,
+                size,
+            }],
+        );
 
         Ok(staging_buffer.alloc().mapped_ptr().unwrap().as_ptr() as *mut u8)
     }
@@ -55,7 +64,11 @@ impl StagingBelt {
         } else {
             assert!(size < self.chunk_size);
             let buffer = rd
-                .buffer_create(self.chunk_size.max(size), vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::CpuToGpu)
+                .buffer_create(
+                    &BufferDesc::new(self.chunk_size.max(size))
+                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                        .location(MemoryLocation::CpuToGpu),
+                )
                 .unwrap();
             buffer.set_name(format!("staging chunk {}", self.active_chunks.len()));
             self.active_chunks.push(StagingChunk { buffer, cursor: 0 });

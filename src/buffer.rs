@@ -10,6 +10,7 @@ use gpu_allocator::vulkan::Allocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
 use gpu_allocator::vulkan::AllocationScheme;
 
+use crate::BufferDesc;
 use crate::Handle;
 use crate::RenderingDevice;
 use crate::Resource;
@@ -44,34 +45,9 @@ pub struct BufferImpl {
 }
 
 impl RenderingDevice {
-    /// Creates a GPU-only uniform buffer.
-    pub fn buffer_uniform(&self, size: u64) -> Result<Buffer> {
-        self.buffer_create(size, vk::BufferUsageFlags::UNIFORM_BUFFER, MemoryLocation::GpuOnly)
-    }
-
-    /// Creates a GPU-only storage buffer.
-    pub fn buffer_storage(&self, size: u64) -> Result<Buffer> {
-        self.buffer_create(size, vk::BufferUsageFlags::STORAGE_BUFFER, MemoryLocation::GpuOnly)
-    }
-
-    /// Creates a GPU-only index buffer.
-    pub fn buffer_index(&self, size: u64) -> Result<Buffer> {
-        self.buffer_create(size, vk::BufferUsageFlags::INDEX_BUFFER, MemoryLocation::GpuOnly)
-    }
-
-    /// Creates a GPU-only vertex buffer.
-    pub fn buffer_vertex(&self, size: u64) -> Result<Buffer> {
-        self.buffer_create(size, vk::BufferUsageFlags::VERTEX_BUFFER, MemoryLocation::GpuOnly)
-    }
-
-    /// Creates a GPU-only indirect buffer.
-    pub fn buffer_indirect(&self, size: u64) -> Result<Buffer> {
-        self.buffer_create(size, vk::BufferUsageFlags::INDIRECT_BUFFER, MemoryLocation::GpuOnly)
-    }
-
-    /// Allocates and creates a buffer with specific usage flags and memory location.
-    pub fn buffer_create(&self, size: u64, usage: vk::BufferUsageFlags, location: MemoryLocation) -> Result<Buffer> {
-        self.buffer_from_info(vk::BufferCreateInfo::default().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE), location)
+    /// Creates a buffer based on the provided description, allocating memory and binding it.
+    pub fn buffer_create(&self, desc: &BufferDesc) -> Result<Buffer> {
+        self.buffer_from_info(vk::BufferCreateInfo::default().size(desc.size).usage(desc.usage).sharing_mode(vk::SharingMode::EXCLUSIVE), desc.location)
     }
 
     pub fn buffer_from_info(&self, mut info: vk::BufferCreateInfo, location: MemoryLocation) -> Result<Buffer> {

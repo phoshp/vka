@@ -8,9 +8,9 @@ pub fn main() -> vka::Result<()> {
     env_logger::init();
     let rd = vka::RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
 
-    let buffer = rd.buffer_uniform(16 * 1024)?;
+    let buffer = rd.buffer_create(&vka::BufferDesc::uniform(4 * 1024))?;
     buffer.set_name("demo uniform buffer");
-    let image = rd.image_2d(vk::Format::R8G8B8A8_UNORM, 256, 256, 1, 1, vk::SampleCountFlags::TYPE_1, vk::ImageUsageFlags::SAMPLED)?;
+    let image = rd.image_create(&vka::ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 256, 256))?;
     let img_view = rd.image_full_view(&image);
     let sampler = rd.sampler_nearest(vk::SamplerAddressMode::REPEAT);
 
