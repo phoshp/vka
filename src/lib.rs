@@ -17,7 +17,9 @@ mod resource;
 mod surface;
 mod swapchain;
 mod utils;
+mod pass;
 
+pub use pass::*;
 pub use buffer::*;
 pub use image::*;
 pub use info::*;

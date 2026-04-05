@@ -63,6 +63,10 @@ impl ImageImpl {
             .level_count(vk::REMAINING_MIP_LEVELS)
             .layer_count(vk::REMAINING_ARRAY_LAYERS)
     }
+
+    pub fn assume_layout(&self, layout: vk::ImageLayout) {
+        self.layout.set(layout);
+    }
 }
 
 pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
