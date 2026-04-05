@@ -265,6 +265,19 @@ impl RenderingDevice {
         }
     }
 
+    pub fn next_subpass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass) {
+        for (i, t) in rpass.images.iter().enumerate() {
+            // we assumed image layouts of attachments remain same during whole pass, so guarantee this inside next subpass
+            let required_layout = rpass.initial_layouts[i];
+            if t.layout.get() != required_layout {
+                self.barrier_image(cmd, t, required_layout);
+            }
+        }
+        unsafe {
+            self.device.cmd_next_subpass(cmd, vk::SubpassContents::INLINE);
+        }
+    }
+
     pub fn end_render_pass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass) {
         unsafe {
             self.device.cmd_end_render_pass(cmd);
