@@ -14,7 +14,7 @@ pub fn main() -> vka::Result<()> {
             image: &color_image,
             layout: None, // let it infer
             ops: vka::Operations::Color {
-                load: vka::LoadOp::Clear(vec4(1.0, 0.0, 0.0, 1.0)),
+                load: vka::LoadOp::Clear(vec4(1.0, 1.0, 0.0, 1.0)),
                 store: vka::StoreOp::Store,
             },
         }],
@@ -30,16 +30,13 @@ pub fn main() -> vka::Result<()> {
             offset: vk::Offset2D::default(),
             extent: vk::Extent2D { width: 128, height: 128 },
         });
-
-        // Hmmm...
-
         rd.end_render_pass(cmd, &rpass);
     });
     rd.submit_wait()?;
 
     // read the rendered image back.
     let mut image_raw_data = [0u8; 128 * 128 * 4];
-    rd.read_image(&color_image, &mut image_raw_data)?;
+    rd.read_image(&color_image, &mut image_raw_data, 4)?;
 
     let mut img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(128, 128, image_raw_data.as_mut()).unwrap();
     img.save("examples/rpass.png")?;

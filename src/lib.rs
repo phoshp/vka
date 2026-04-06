@@ -489,18 +489,19 @@ impl RenderingDevice {
     }
 
     pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> Result<()> {
-        let ptr = { self.frame().belt.borrow_mut().read(self, buffer, offset, data.len() as u64)? };
+        let ptr = { self.frame().belt.borrow_mut().read_buffer(self, buffer, offset, data.len() as u64)? };
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         self.submit_wait()?;
         data.copy_from_slice(read);
         Result::Ok(())
     }
 
-    pub fn read_image(&self, image: &Image, data: &mut [u8]) -> Result<()> {
+    pub fn read_image(&self, image: &Image, data: &mut [u8], bytes_per_pixel: u64) -> Result<()> {
         let ptr = {
             self.frame().belt.borrow_mut().read_image(
                 self,
                 image,
+                bytes_per_pixel,
                 &vk::BufferImageCopy::default()
                     .image_extent(vk::Extent3D {
                         width: image.extent.width,
@@ -650,17 +651,18 @@ impl Drop for RenderingDeviceImpl {
             if let Some(debug_utils) = &self.debug_utils {
                 debug_utils.instance.destroy_debug_utils_messenger(debug_utils.messenger, None);
             }
-            // for chunk in self.belt.borrow_mut().active_chunks.iter_mut() {
-            //     Rc::get_mut(&mut chunk.buffer).unwrap().destroy(self);
-            // }
-            // if let Some(mut readback) = self.belt.borrow_mut().readback_buffer.take() {
-            //     Rc::get_mut(&mut readback).unwrap().destroy(self);
-            // }
 
             for frame in self.frames.iter() {
                 self.device.destroy_fence(frame.fence, None);
                 self.device.destroy_semaphore(frame.image_semaphore, None);
                 self.device.destroy_command_pool(frame.cmd_pool, None);
+                
+                for chunk in frame.belt.borrow_mut().active_chunks.iter_mut() {
+                    Rc::get_mut(&mut chunk.buffer).unwrap().destroy(self);
+                }
+                if let Some(mut readback) = frame.belt.borrow_mut().readback_buffer.take() {
+                    Rc::get_mut(&mut readback).unwrap().destroy(self);
+                }
             }
             if let Some(swapchain) = self.swapchain.borrow().as_ref() {
                 for &sem in swapchain.present_semaphores.iter() {

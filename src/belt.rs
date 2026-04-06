@@ -30,42 +30,36 @@ impl StagingBelt {
         }
     }
 
-    pub fn read_image(&mut self, rd: &RenderingDevice, image: &Image, region: &vk::BufferImageCopy) -> Result<*mut u8> {
-        // wtf
-        let size = region.image_extent.width as u64 * region.image_extent.height as u64 * region.image_extent.depth as u64 * 4; // assuming 4 bytes per pixel (e.g. RGBA8)
-        if size <= 0 {
-            return Err(anyhow!("Tried to read zero bytes from staging buffer"));
-        }
+    pub fn ensure_readback_buffer(&mut self, rd: &RenderingDevice, size: u64) -> Result<()> {
         if self.readback_buffer.as_ref().map_or(true, |b| b.size < size) {
             let buf = rd.buffer_create(&BufferDesc::new(size).location(MemoryLocation::GpuToCpu))?;
             buf.set_name("staging readback buffer");
             self.readback_buffer = Some(buf);
         }
+        Ok(())
+    }
+
+    pub fn read_image(&mut self, rd: &RenderingDevice, image: &Image, bytes_per_pixel: u64, region: &vk::BufferImageCopy) -> Result<*mut u8> {
+        let size = region.image_extent.width as u64 * region.image_extent.height as u64 * region.image_extent.depth as u64 * bytes_per_pixel;
+        if size <= 0 {
+            return Err(anyhow!("Tried to read zero bytes from staging buffer"));
+        }
+        self.ensure_readback_buffer(rd, size)?;
         let staging_buffer = self.readback_buffer.as_ref().unwrap();
         rd.record(|dev, cmd| unsafe {
             let prev = rd.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-            dev.cmd_copy_image_to_buffer(
-                cmd,
-                image.handle,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                staging_buffer.handle,
-                &[region.clone()],
-            );
+            dev.cmd_copy_image_to_buffer(cmd, image.handle, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging_buffer.handle, &[region.clone()]);
             rd.barrier_image(cmd, image, prev);
         });
 
         Ok(staging_buffer.alloc().mapped_ptr().unwrap().as_ptr() as *mut u8)
     }
 
-    pub fn read(&mut self, rd: &RenderingDevice, buffer: &Buffer, offset: u64, size: u64) -> Result<*mut u8> {
+    pub fn read_buffer(&mut self, rd: &RenderingDevice, buffer: &Buffer, offset: u64, size: u64) -> Result<*mut u8> {
         if size <= 0 {
             return Err(anyhow!("Tried to read zero bytes from staging buffer"));
         }
-        if self.readback_buffer.as_ref().map_or(true, |b| b.size < size) {
-            let buf = rd.buffer_create(&BufferDesc::new(size).location(MemoryLocation::GpuToCpu))?;
-            buf.set_name("staging readback buffer");
-            self.readback_buffer = Some(buf);
-        }
+        self.ensure_readback_buffer(rd, size)?;
         let staging_buffer = self.readback_buffer.as_ref().unwrap();
         rd.copy_buffer(
             buffer,
