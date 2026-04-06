@@ -8,6 +8,7 @@ use gpu_allocator::MemoryLocation;
 
 use crate::Buffer;
 use crate::BufferDesc;
+use crate::Image;
 use crate::RenderingDevice;
 use crate::Result;
 use crate::utils;
@@ -27,6 +28,33 @@ impl StagingBelt {
             active_chunks: Vec::new(),
             readback_buffer: None,
         }
+    }
+
+    pub fn read_image(&mut self, rd: &RenderingDevice, image: &Image, region: &vk::BufferImageCopy) -> Result<*mut u8> {
+        // wtf
+        let size = region.image_extent.width as u64 * region.image_extent.height as u64 * region.image_extent.depth as u64 * 4; // assuming 4 bytes per pixel (e.g. RGBA8)
+        if size <= 0 {
+            return Err(anyhow!("Tried to read zero bytes from staging buffer"));
+        }
+        if self.readback_buffer.as_ref().map_or(true, |b| b.size < size) {
+            let buf = rd.buffer_create(&BufferDesc::new(size).location(MemoryLocation::GpuToCpu))?;
+            buf.set_name("staging readback buffer");
+            self.readback_buffer = Some(buf);
+        }
+        let staging_buffer = self.readback_buffer.as_ref().unwrap();
+        rd.record(|dev, cmd| unsafe {
+            let prev = rd.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            dev.cmd_copy_image_to_buffer(
+                cmd,
+                image.handle,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                staging_buffer.handle,
+                &[region.clone()],
+            );
+            rd.barrier_image(cmd, image, prev);
+        });
+
+        Ok(staging_buffer.alloc().mapped_ptr().unwrap().as_ptr() as *mut u8)
     }
 
     pub fn read(&mut self, rd: &RenderingDevice, buffer: &Buffer, offset: u64, size: u64) -> Result<*mut u8> {

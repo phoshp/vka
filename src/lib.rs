@@ -13,16 +13,16 @@ mod belt;
 mod buffer;
 mod image;
 mod info;
+mod pass;
 mod resource;
 mod surface;
 mod swapchain;
 mod utils;
-mod pass;
 
-pub use pass::*;
 pub use buffer::*;
 pub use image::*;
 pub use info::*;
+pub use pass::*;
 pub use resource::*;
 pub use surface::*;
 pub use swapchain::*;
@@ -490,6 +490,31 @@ impl RenderingDevice {
 
     pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> Result<()> {
         let ptr = { self.frame().belt.borrow_mut().read(self, buffer, offset, data.len() as u64)? };
+        let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
+        self.submit_wait()?;
+        data.copy_from_slice(read);
+        Result::Ok(())
+    }
+
+    pub fn read_image(&self, image: &Image, data: &mut [u8]) -> Result<()> {
+        let ptr = {
+            self.frame().belt.borrow_mut().read_image(
+                self,
+                image,
+                &vk::BufferImageCopy::default()
+                    .image_extent(vk::Extent3D {
+                        width: image.extent.width,
+                        height: image.extent.height,
+                        depth: image.extent.depth,
+                    })
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: image.aspect,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+            )?
+        };
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         self.submit_wait()?;
         data.copy_from_slice(read);

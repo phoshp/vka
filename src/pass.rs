@@ -10,15 +10,15 @@ use crate::Image;
 use crate::RenderingDevice;
 use crate::Resource;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RenderPass(Handle<RenderPassImpl>);
 
-#[derive(Debug)]
 pub struct RenderPassImpl {
     pub handle: vk::RenderPass,
 
     pub framebuffer: vk::Framebuffer,
     pub images: Vec<Image>,
+    pub clear_values: Vec<vk::ClearValue>,
     pub initial_layouts: Vec<vk::ImageLayout>,
     pub final_layouts: Vec<vk::ImageLayout>
 }
@@ -43,14 +43,11 @@ pub enum StoreOp {
 
 pub struct Attachment<'a> {
     pub image: &'a Image,
+    pub layout: Option<(vk::ImageLayout, vk::ImageLayout)>,
     pub ops: Operations,
 }
 
 pub enum Operations {
-    Input {
-        load: LoadOp<Vec4>,
-        store: StoreOp,
-    },
     Color {
         load: LoadOp<Vec4>,
         store: StoreOp,
@@ -68,6 +65,7 @@ pub struct SubpassDesc<'a> {
     pub inputs: &'a [u32],
     pub colors: &'a [(u32, Option<u32>)],
     pub depth_stencil: Option<u32>,
+    pub preserve: &'a [u32],
     pub bind_point: vk::PipelineBindPoint,
 }
 
@@ -88,36 +86,33 @@ fn conv_usage_to_layout(usage: vk::ImageUsageFlags) -> vk::ImageLayout {
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
     }
 }
+fn conv_load_op<V>(op: &LoadOp<V>) -> vk::AttachmentLoadOp {
+    match op {
+        LoadOp::Load => vk::AttachmentLoadOp::LOAD,
+        LoadOp::Clear(_) => vk::AttachmentLoadOp::CLEAR,
+        LoadOp::Discard => vk::AttachmentLoadOp::DONT_CARE,
+    }
+}
+fn conv_store_op(op: &StoreOp) -> vk::AttachmentStoreOp {
+    match op {
+        StoreOp::Store => vk::AttachmentStoreOp::STORE,
+        StoreOp::Discard => vk::AttachmentStoreOp::DONT_CARE,
+    }
+}
 
 pub struct RenderPassBeginDesc<'a> {
     pub pass: &'a RenderPass,
     pub render_area: vk::Rect2D,
-    pub clear_values: &'a [vk::ClearValue],
 }
 
 impl RenderingDevice {
     pub fn render_pass_create(&self, desc: &RenderPassDesc) -> RenderPass {
-        fn conv_load_op<V>(op: &LoadOp<V>) -> vk::AttachmentLoadOp {
-            match op {
-                LoadOp::Load => vk::AttachmentLoadOp::LOAD,
-                LoadOp::Clear(_) => vk::AttachmentLoadOp::CLEAR,
-                LoadOp::Discard => vk::AttachmentLoadOp::DONT_CARE,
-            }
-        }
-        fn conv_store_op(op: &StoreOp) -> vk::AttachmentStoreOp {
-            match op {
-                StoreOp::Store => vk::AttachmentStoreOp::STORE,
-                StoreOp::Discard => vk::AttachmentStoreOp::DONT_CARE,
-            }
-        }
-
         let attachments = desc
             .attachments
             .iter()
             .map(|a| {
                 let ops = match &a.ops {
-                    Operations::Input { load, store } => (conv_load_op(&load), conv_store_op(&store), vk::AttachmentLoadOp::LOAD, vk::AttachmentStoreOp::STORE),
-                    Operations::Color { load, store } => (conv_load_op(&load), conv_store_op(&store), vk::AttachmentLoadOp::LOAD, vk::AttachmentStoreOp::STORE),
+                    Operations::Color { load, store } => (conv_load_op(&load), conv_store_op(&store), vk::AttachmentLoadOp::DONT_CARE, vk::AttachmentStoreOp::DONT_CARE),
                     Operations::DepthStencil {
                         load,
                         store,
@@ -125,11 +120,10 @@ impl RenderingDevice {
                         stencil_store,
                     } => (conv_load_op(&load), conv_store_op(&store), conv_load_op(&stencil_load), conv_store_op(&stencil_store)),
                 };
-                let layout = match a.ops {
-                    Operations::Input { .. } => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    Operations::Color { .. } => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    Operations::DepthStencil { .. } => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                };
+                let (init_layout, final_layout) = a.layout.unwrap_or_else(|| {
+                    let x = conv_usage_to_layout(a.image.usage);
+                    (x, x)
+                });
                 vk::AttachmentDescription::default()
                     .format(a.image.format)
                     .samples(a.image.samples)
@@ -137,10 +131,34 @@ impl RenderingDevice {
                     .store_op(ops.1)
                     .stencil_load_op(ops.2)
                     .stencil_store_op(ops.3)
-                    .initial_layout(layout)
-                    .final_layout(layout)
+                    .initial_layout(init_layout)
+                    .final_layout(final_layout)
             })
             .collect::<Vec<_>>();
+
+        let clear_values = desc.attachments.iter().map(|a| {
+            match &a.ops {
+                Operations::Color { load, .. } => match load {
+                    LoadOp::Clear(c) => vk::ClearValue {
+                        color: vk::ClearColorValue { float32: [c.x, c.y, c.z, c.w] },
+                    },
+                    _ => vk::ClearValue::default(),
+                },
+                Operations::DepthStencil { load, stencil_load, .. } => {
+                    let depth = match load {
+                        LoadOp::Clear(c) => *c,
+                        _ => 1.0,
+                    };
+                    let stencil = match stencil_load {
+                        LoadOp::Clear(c) => *c,
+                        _ => 0,
+                    };
+                    vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue { depth, stencil },
+                    }
+                }
+            }
+        }).collect::<Vec<_>>();
 
         let mut subpasses = Vec::new();
         let refs = attachments
@@ -152,6 +170,7 @@ impl RenderingDevice {
         let mut subpass_colors = Vec::new();
         let mut subpass_resolves = Vec::new();
         let mut subpass_depth_stencil = Vec::new();
+        let mut subpass_reserve = Vec::new();
 
         for s in desc.subpasses.iter() {
             subpass_inputs.push(Vec::from_iter(s.inputs.iter().map(|&i| refs[i as usize])));
@@ -172,6 +191,7 @@ impl RenderingDevice {
                     .map(|i| refs[i as usize])
                     .unwrap_or(vk::AttachmentReference::default().attachment(vk::ATTACHMENT_UNUSED)),
             );
+            subpass_reserve.push(Vec::from_iter(s.preserve.iter().map(|&i| i)));
         }
 
         let mut dependencies = Vec::new();
@@ -183,9 +203,9 @@ impl RenderingDevice {
                 .input_attachments(&subpass_inputs[i])
                 .color_attachments(&subpass_colors[i])
                 .resolve_attachments(&subpass_resolves[i])
-                .depth_stencil_attachment(&subpass_depth_stencil[i]);
+                .depth_stencil_attachment(&subpass_depth_stencil[i])
+                .preserve_attachments(&subpass_reserve[i]);
             subpasses.push(subpass);
-
             dependencies.push(
                 vk::SubpassDependency::default()
                     .src_subpass(prev_subpass)
@@ -238,6 +258,7 @@ impl RenderingDevice {
             handle: raw,
             framebuffer,
             images: desc.attachments.iter().map(|a| a.image.clone()).collect_vec(),
+            clear_values,
             initial_layouts,
             final_layouts,
         };
@@ -248,20 +269,23 @@ impl RenderingDevice {
         }))
     }
 
-    pub fn begin_render_pass(&self, cmd: vk::CommandBuffer, desc: &RenderPassBeginDesc) {
+    pub fn begin_render_pass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass, area: vk::Rect2D) {
         unsafe {
+            for (i, t) in rpass.images.iter().enumerate() {
+                let init_layout = rpass.initial_layouts[i];
+                if t.layout.get() != init_layout && init_layout != vk::ImageLayout::UNDEFINED {
+                    self.barrier_image(cmd, t, init_layout);
+                }
+            }
             self.device.cmd_begin_render_pass(
                 cmd,
                 &vk::RenderPassBeginInfo::default()
-                    .render_pass(desc.pass.handle)
-                    .framebuffer(desc.pass.framebuffer)
-                    .render_area(desc.render_area)
-                    .clear_values(desc.clear_values),
+                    .render_pass(rpass.handle)
+                    .framebuffer(rpass.framebuffer)
+                    .render_area(area)
+                    .clear_values(&rpass.clear_values),
                 vk::SubpassContents::INLINE,
             );
-        }
-        for (i, t) in desc.pass.images.iter().enumerate() {
-            t.assume_layout(desc.pass.initial_layouts[i]);
         }
     }
 
