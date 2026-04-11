@@ -1,11 +1,12 @@
 #![allow(unused)]
 use ash::vk;
 use glam::vec4;
+
 pub use vka::*;
 
 pub fn main() -> vka::Result<()> {
     env_logger::init();
-    let rd = RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
+    let rd = RenderingDevice::new(&RenderingDeviceDesc::default().with_gpu_validation())?;
     let color_image = rd.image_create(&ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 128, 128).usage(vk::ImageUsageFlags::COLOR_ATTACHMENT))?;
 
     let rpass = rd.render_pass_create(&vka::RenderPassDesc {
@@ -18,7 +19,7 @@ pub fn main() -> vka::Result<()> {
                 store: vka::StoreOp::Store,
             },
         }],
-        subpasses: &[vka::SubpassDesc {
+        subpasses: &[vka::Subpass {
             colors: &[(0, None)],
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             ..Default::default()

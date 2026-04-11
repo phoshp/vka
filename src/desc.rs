@@ -4,14 +4,14 @@ use ash::vk;
 use gpu_allocator::MemoryLocation;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-pub struct RenderingDeviceInfo<'a> {
+pub struct RenderingDeviceDesc<'a> {
     pub app_name: &'a CStr,
     pub gpu_validation: bool,
     pub pick_device: Option<usize>,                             // index for picking a specific device
     pub surface: Option<(RawDisplayHandle, RawWindowHandle)>, // None for headless setup
 }
 
-impl RenderingDeviceInfo<'_> {
+impl RenderingDeviceDesc<'_> {
     pub fn with_surface(display: RawDisplayHandle, window: RawWindowHandle) -> Self {
         Self {
             surface: Some((display, window)),
@@ -27,7 +27,7 @@ impl RenderingDeviceInfo<'_> {
     }
 }
 
-impl Default for RenderingDeviceInfo<'_> {
+impl Default for RenderingDeviceDesc<'_> {
     fn default() -> Self {
         Self {
             app_name: c"vka app",

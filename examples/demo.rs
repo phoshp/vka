@@ -2,11 +2,11 @@
 
 use ash::vk;
 use vka;
-use vka::RenderingDeviceInfo;
+use vka::RenderingDeviceDesc;
 
 pub fn main() -> vka::Result<()> {
     env_logger::init();
-    let rd = vka::RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
+    let rd = vka::RenderingDevice::new(&RenderingDeviceDesc::default().with_gpu_validation())?;
 
     let buffer = rd.buffer_create(&vka::BufferDesc::uniform(4 * 1024))?;
     buffer.set_name("demo uniform buffer");

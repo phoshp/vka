@@ -12,7 +12,7 @@ use std::sync::Mutex as StdMutex;
 mod belt;
 mod buffer;
 mod image;
-mod info;
+mod desc;
 mod pass;
 mod resource;
 mod surface;
@@ -21,7 +21,7 @@ mod utils;
 
 pub use buffer::*;
 pub use image::*;
-pub use info::*;
+pub use desc::*;
 pub use pass::*;
 pub use resource::*;
 pub use surface::*;
@@ -123,7 +123,7 @@ impl Deref for RenderingDevice {
 
 impl RenderingDevice {
     /// Initializes a new Vulkan rendering device, instances, and necessary Queues/Allocators according to `RenderingDeviceInfo`.
-    pub fn new(info: &RenderingDeviceInfo) -> Result<Self> {
+    pub fn new(info: &RenderingDeviceDesc) -> Result<Self> {
         unsafe {
             let vulkan_version = ENTRY.try_enumerate_instance_version()?.unwrap_or(vk::API_VERSION_1_0);
             let enum_layer_props = ENTRY.enumerate_instance_layer_properties()?;

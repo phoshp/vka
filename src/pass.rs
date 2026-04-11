@@ -61,7 +61,7 @@ pub enum Operations {
 }
 
 #[derive(Debug, Default)]
-pub struct SubpassDesc<'a> {
+pub struct Subpass<'a> {
     pub inputs: &'a [u32],
     pub colors: &'a [(u32, Option<u32>)],
     pub depth_stencil: Option<u32>,
@@ -72,7 +72,7 @@ pub struct SubpassDesc<'a> {
 pub struct RenderPassDesc<'a> {
     pub extent: vk::Extent2D,
     pub attachments: &'a [Attachment<'a>],
-    pub subpasses: &'a [SubpassDesc<'a>],
+    pub subpasses: &'a [Subpass<'a>],
 }
 
 fn conv_usage_to_layout(usage: vk::ImageUsageFlags) -> vk::ImageLayout {

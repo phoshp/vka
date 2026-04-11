@@ -4,7 +4,7 @@ pub use vka::*;
 
 pub fn main() -> vka::Result<()> {
     env_logger::init();
-    let rd = RenderingDevice::new(&RenderingDeviceInfo::default().with_gpu_validation())?;
+    let rd = RenderingDevice::new(&RenderingDeviceDesc::default().with_gpu_validation())?;
     let pixels = rd.image_create(
         &ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 1024, 1024)
             .tiling(vk::ImageTiling::LINEAR)
