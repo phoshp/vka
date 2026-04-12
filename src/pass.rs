@@ -1,12 +1,19 @@
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::ops::Deref;
 
 use ash::vk;
+use ash::vk::Extent2D;
 use glam::Vec4;
 use itertools::Itertools;
 
 use crate::Handle;
 use crate::Image;
+use crate::ImageView;
 use crate::RenderingDevice;
 use crate::Resource;
 
@@ -16,8 +23,9 @@ pub struct RenderPass(Handle<RenderPassImpl>);
 pub struct RenderPassImpl {
     pub handle: vk::RenderPass,
 
-    pub framebuffer: vk::Framebuffer,
-    pub images: Vec<Image>,
+    pub framebuffers: RefCell<HashMap<u64, vk::Framebuffer>>,
+    pub images: RefCell<Vec<Image>>,
+
     pub clear_values: Vec<vk::ClearValue>,
     pub initial_layouts: Vec<vk::ImageLayout>,
     pub final_layouts: Vec<vk::ImageLayout>
@@ -41,9 +49,11 @@ pub enum StoreOp {
     Discard,
 }
 
-pub struct Attachment<'a> {
-    pub image: &'a Image,
-    pub layout: Option<(vk::ImageLayout, vk::ImageLayout)>,
+pub struct Attachment {
+    pub format: vk::Format,
+    pub samples: u32,
+    pub layout: vk::ImageLayout,
+    pub final_layout: Option<vk::ImageLayout>,
     pub ops: Operations,
 }
 
@@ -70,8 +80,7 @@ pub struct Subpass<'a> {
 }
 
 pub struct RenderPassDesc<'a> {
-    pub extent: vk::Extent2D,
-    pub attachments: &'a [Attachment<'a>],
+    pub attachments: &'a [Attachment],
     pub subpasses: &'a [Subpass<'a>],
 }
 
@@ -120,19 +129,15 @@ impl RenderingDevice {
                         stencil_store,
                     } => (conv_load_op(&load), conv_store_op(&store), conv_load_op(&stencil_load), conv_store_op(&stencil_store)),
                 };
-                let (init_layout, final_layout) = a.layout.unwrap_or_else(|| {
-                    let x = conv_usage_to_layout(a.image.usage);
-                    (x, x)
-                });
                 vk::AttachmentDescription::default()
-                    .format(a.image.format)
-                    .samples(a.image.samples)
+                    .format(a.format)
+                    .samples(vk::SampleCountFlags::from_raw(a.samples))
                     .load_op(ops.0)
                     .store_op(ops.1)
                     .stencil_load_op(ops.2)
                     .stencil_store_op(ops.3)
-                    .initial_layout(init_layout)
-                    .final_layout(final_layout)
+                    .initial_layout(a.layout)
+                    .final_layout(a.final_layout.unwrap_or(a.layout))
             })
             .collect::<Vec<_>>();
 
@@ -239,49 +244,67 @@ impl RenderingDevice {
                 .unwrap()
         };
 
-        let framebuffer = unsafe {
-            self.device
-                .create_framebuffer(
-                    &vk::FramebufferCreateInfo::default()
-                        .render_pass(raw)
-                        .attachments(&desc.attachments.iter().map(|t| self.image_full_view(t.image)).collect_vec())
-                        .width(desc.extent.width)
-                        .height(desc.extent.height)
-                        .layers(1),
-                    None,
-                )
-                .unwrap()
-        };
         let initial_layouts = attachments.iter().map(|a| a.initial_layout).collect_vec();
         let final_layouts = attachments.iter().map(|a| a.final_layout).collect_vec();
         let rpass = RenderPassImpl {
             handle: raw,
-            framebuffer,
-            images: desc.attachments.iter().map(|a| a.image.clone()).collect_vec(),
+            framebuffers: Default::default(),
+
+            images: RefCell::new(Vec::with_capacity(attachments.len())),
             clear_values,
             initial_layouts,
             final_layouts,
         };
 
         RenderPass(Resource::new(self, rpass, None, |res, rd| unsafe {
+            for fb in res.framebuffers.borrow().values() {
+                rd.device.destroy_framebuffer(*fb, None);
+            }
             rd.device.destroy_render_pass(res.handle, None);
-            rd.device.destroy_framebuffer(res.framebuffer, None);
         }))
     }
 
-    pub fn begin_render_pass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass, area: vk::Rect2D) {
+    pub fn begin_render_pass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass, views: &[&ImageView], area: vk::Rect2D) {
         unsafe {
-            for (i, t) in rpass.images.iter().enumerate() {
+            let mut images = rpass.images.borrow_mut();
+            images.clear();
+            images.extend(views.iter().map(|i| i.get_image().expect("attachment image must be valid")));
+
+            for (i, t) in images.iter().enumerate() {
                 let init_layout = rpass.initial_layouts[i];
                 if t.layout.get() != init_layout && init_layout != vk::ImageLayout::UNDEFINED {
                     self.barrier_image(cmd, t, init_layout);
                 }
             }
+
+            let extent = vk::Extent2D {
+                width: area.extent.width + area.offset.x.max(0) as u32,
+                height: area.extent.height + area.offset.y.max(0) as u32,
+            };
+            let mut hasher = DefaultHasher::new();
+            extent.hash(&mut hasher);
+            views.iter().for_each(|t| t.id.hash(&mut hasher));
+            let framebuffer_key = hasher.finish();
+
+            let framebuffer = *rpass.framebuffers.borrow_mut().entry(framebuffer_key).or_insert_with(|| unsafe {
+                self.device
+                    .create_framebuffer(
+                        &vk::FramebufferCreateInfo::default()
+                            .render_pass(rpass.handle)
+                            .attachments(&images.iter().map(|t| self.image_full_view(t).handle).collect_vec())
+                            .width(extent.width)
+                            .height(extent.height)
+                            .layers(1),
+                        None,
+                    )
+                    .unwrap()
+            });
+
             self.device.cmd_begin_render_pass(
                 cmd,
                 &vk::RenderPassBeginInfo::default()
                     .render_pass(rpass.handle)
-                    .framebuffer(rpass.framebuffer)
+                    .framebuffer(framebuffer)
                     .render_area(area)
                     .clear_values(&rpass.clear_values),
                 vk::SubpassContents::INLINE,
@@ -290,7 +313,7 @@ impl RenderingDevice {
     }
 
     pub fn next_subpass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass) {
-        for (i, t) in rpass.images.iter().enumerate() {
+        for (i, t) in rpass.images.borrow().iter().enumerate() {
             // we assumed image layouts of attachments remain same during whole pass, so guarantee this inside next subpass
             let required_layout = rpass.initial_layouts[i];
             if t.layout.get() != required_layout {
@@ -306,7 +329,7 @@ impl RenderingDevice {
         unsafe {
             self.device.cmd_end_render_pass(cmd);
         }
-        for (i, t) in rpass.images.iter().enumerate() {
+        for (i, t) in rpass.images.borrow().iter().enumerate() {
             t.assume_layout(rpass.final_layouts[i]);
         }
     }

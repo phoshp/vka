@@ -114,7 +114,6 @@ pub fn make_swapchain(rd: &RenderingDevice, old_swapchain: Option<vk::SwapchainK
                     vk::ImageUsageFlags::COLOR_ATTACHMENT,
                     None,
                 );
-                img.layout.set(vk::ImageLayout::PRESENT_SRC_KHR); // initial state for swapchain images
                 img.set_name(format!("Swapchain Image {}", j));
                 img
             })

@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::rc::Rc;
+use std::rc::Weak;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -17,6 +20,7 @@ use crate::ImageDesc;
 use crate::RenderingDevice;
 use crate::Resource;
 use crate::Result;
+use crate::WeakHandle;
 use crate::bytes_of;
 use crate::utils;
 
@@ -50,8 +54,8 @@ pub struct ImageImpl {
     pub aspect: vk::ImageAspectFlags,
     pub samples: vk::SampleCountFlags,
 
-    full_view: OnceCell<vk::ImageView>,
-    views: RefCell<HashMap<u64, vk::ImageView>>,
+    full_view: OnceCell<ImageView>,
+    pub(crate) views: RefCell<HashMap<u64, ImageView>>,
 
     pub layout: Cell<vk::ImageLayout>,
 }
@@ -66,6 +70,21 @@ impl ImageImpl {
 
     pub fn assume_layout(&self, layout: vk::ImageLayout) {
         self.layout.set(layout);
+    }
+}
+
+static VIEW_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug)]
+pub struct ImageView {
+    pub handle: vk::ImageView,
+    pub id: u64,
+    image: WeakHandle<ImageImpl>,
+}
+
+impl ImageView {
+    pub fn get_image(&self) -> Option<Image> {
+        self.image.upgrade().map(Image)
     }
 }
 
@@ -149,7 +168,7 @@ impl RenderingDevice {
             alloc,
             |res, rd| unsafe {
                 for view in res.views.borrow().values() {
-                    rd.device.destroy_image_view(*view, None);
+                    rd.device.destroy_image_view(view.handle, None);
                 }
                 rd.device.destroy_image(res.handle, None);
             },
@@ -157,8 +176,8 @@ impl RenderingDevice {
     }
 
     /// Gets or creates a view encompassing the entire image (all mips and layers).
-    pub fn image_full_view(&self, image: &Image) -> vk::ImageView {
-        *image.full_view.get_or_init(|| {
+    pub fn image_full_view<'a>(&self, image: &'a Image) -> &'a ImageView {
+        image.full_view.get_or_init(|| {
             self.image_view_range(
                 image,
                 vk::ImageSubresourceRange::default()
@@ -171,7 +190,7 @@ impl RenderingDevice {
 
     /// Gets or creates a view for a specific mip level and array layer.
     #[inline]
-    pub fn image_view(&self, image: &Image, mip_level: u32, layer: u32) -> vk::ImageView {
+    pub fn image_view(&self, image: &Image, mip_level: u32, layer: u32) -> ImageView {
         self.image_view_range(
             image,
             vk::ImageSubresourceRange::default()
@@ -184,7 +203,7 @@ impl RenderingDevice {
     }
 
     /// Gets or creates a view covering a custom `vk::ImageSubresourceRange`.
-    pub fn image_view_range(&self, image: &Image, range: vk::ImageSubresourceRange) -> vk::ImageView {
+    pub fn image_view_range(&self, image: &Image, range: vk::ImageSubresourceRange) -> ImageView {
         self.image_view_create(
             image,
             &vk::ImageViewCreateInfo::default()
@@ -195,13 +214,18 @@ impl RenderingDevice {
         )
     }
 
-    pub fn image_view_create(&self, image: &Image, info: &vk::ImageViewCreateInfo) -> vk::ImageView {
+    pub fn image_view_create(&self, image: &Image, info: &vk::ImageViewCreateInfo) -> ImageView {
         let hash = utils::hash_struct(info);
         if let Some(view) = image.views.borrow().get(&hash) {
-            return *view;
+            return view.clone();
         }
-        let view = unsafe { self.device.create_image_view(info, None).unwrap() };
-        image.views.borrow_mut().insert(hash, view);
+        let raw = unsafe { self.device.create_image_view(info, None).unwrap() };
+        let view = ImageView {
+            handle: raw,
+            id: VIEW_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            image: Rc::downgrade(image),
+        };
+        image.views.borrow_mut().insert(hash, view.clone());
         view
     }
 

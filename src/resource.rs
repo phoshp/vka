@@ -7,6 +7,8 @@ use std::ops::DerefMut;
 use std::ops::Range;
 use std::rc::Rc;
 use std::rc::Weak;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
@@ -18,11 +20,13 @@ use crate::image::Image;
 /// A ref-counted handle to a GPU resource, such as a buffer or an image.
 /// It holds the resource value, its allocation (if any), and a weak reference to the rendering device for cleanup purposes.
 pub type Handle<T> = Rc<Resource<T>>;
+pub type WeakHandle<T> = Weak<Resource<T>>;
 
 pub struct Resource<T> {
     pub value: T,
     pub alloc: Allocation,
     pub device: Weak<RenderingDeviceImpl>,
+    id: u64,
     name: OnceCell<String>,
     dtor: Option<Box<dyn FnMut(&mut Self, &RenderingDeviceImpl)>>,
 }
@@ -34,7 +38,10 @@ impl<T> Deref for Resource<T> {
     }
 }
 
+static RES_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 impl<T> Resource<T> {
+
     /// Spawns a new ref-counted handling mapping `value`, an allocation, and its destructor closure.
     pub fn new(rd: &RenderingDevice, value: T, alloc: Option<Allocation>, dtor: impl FnMut(&mut Resource<T>, &RenderingDeviceImpl) + 'static) -> Handle<T> {
         let device = Rc::downgrade(&rd.0);
@@ -42,6 +49,7 @@ impl<T> Resource<T> {
             value,
             alloc: alloc.unwrap_or(Allocation::default()),
             device,
+            id: RES_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             name: OnceCell::new(),
             dtor: Some(Box::new(dtor)),
         })
@@ -49,6 +57,10 @@ impl<T> Resource<T> {
 
     pub fn internal(rd: &RenderingDevice, value: T) -> Handle<T> {
         Self::new(rd, value, None, |_, _| {})
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn get_name(&self) -> &str {
@@ -76,8 +88,8 @@ impl<T> Resource<T> {
 
     /// Immediately invokes the destructor and frees the resource and memory.
     pub fn destroy(&mut self, rd: &RenderingDeviceImpl) {
-        let res_name = self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()).to_string();
-        log::debug!("Dropping resource {}", res_name);
+        let res_name = format!("{} (RID:{})", self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()), self.id);
+        log::debug!("Dropping {}", res_name);
         // hmm, not the best way, maybe we can use deferred cleanup.
         unsafe {
             rd.device.queue_wait_idle(rd.graphics_queue).unwrap();
@@ -134,7 +146,7 @@ impl RenderingDevice {
         old_layout
     }
 
-    pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) -> vk::ImageLayout {
+    pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
         unsafe {
             if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
                 new_layout = old_layout;
@@ -185,7 +197,6 @@ impl RenderingDevice {
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
             self.device
                 .cmd_pipeline_barrier(cmd, src_stages, dst_stages, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
-            new_layout
         }
     }
 }

@@ -17,7 +17,7 @@ impl Default for SurfaceConfig {
         Self {
             width: 800,
             height: 600,
-            vsync: true,
+            vsync: false,
         }
     }
 }

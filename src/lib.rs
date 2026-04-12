@@ -63,6 +63,7 @@ pub struct Frame {
     pub cmd_pool: vk::CommandPool,
     front_cmd: Cell<vk::CommandBuffer>,
     back_cmd: Cell<vk::CommandBuffer>,
+    idle: Cell<bool>,
 
     pub image_semaphore: vk::Semaphore,
     pub fence: vk::Fence,
@@ -321,6 +322,7 @@ impl RenderingDevice {
                         cmd_pool,
                         front_cmd: Cell::new(cmds[0]),
                         back_cmd: Cell::new(cmds[1]),
+                        idle: Cell::new(false),
                         image_semaphore,
                         fence,
                         belt: RefCell::new(StagingBelt::new(4 * 1024 * 1024)), // 4 MB per chunk
@@ -391,6 +393,17 @@ impl RenderingDevice {
         &self.frames[self.frame_index.get()]
     }
 
+    pub fn frame_wait_idle(&self, frame: &Frame) -> Result<()> {
+        if !frame.idle.get() {
+            unsafe {
+                self.device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
+                self.device.reset_fences(&[frame.fence])?;
+            }
+            frame.idle.set(true);
+        }
+        Ok(())
+    }
+
     /// Acquires the next available image from the swapchain for rendering. Recreates swapchain if suboptimal.
     pub fn acquire_swapchain_image(&self) -> Option<Image> {
         if let Some(swapchain) = self.swapchain.borrow().as_ref() {
@@ -399,6 +412,8 @@ impl RenderingDevice {
                 self.recreate_swapchain();
             }
             let frame = self.frame();
+            self.frame_wait_idle(frame);
+
             let (image_index, suboptimal) = unsafe {
                 swapchain
                     .device
@@ -427,8 +442,7 @@ impl RenderingDevice {
         unsafe {
             let frame = self.frame();
 
-            self.device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
-            self.device.reset_fences(&[frame.fence])?;
+            self.frame_wait_idle(frame);
             frame.belt.borrow_mut().reset();
 
             self.device.end_command_buffer(frame.front_cmd.get()).unwrap();
@@ -447,6 +461,7 @@ impl RenderingDevice {
 
             self.device.reset_command_buffer(frame.back_cmd.get(), vk::CommandBufferResetFlags::empty())?;
             frame.front_cmd.swap(&frame.back_cmd);
+            frame.idle.set(false);
             self.device.begin_command_buffer(
                 frame.front_cmd.get(),
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
@@ -667,6 +682,11 @@ impl Drop for RenderingDeviceImpl {
             if let Some(swapchain) = self.swapchain.borrow().as_ref() {
                 for &sem in swapchain.present_semaphores.iter() {
                     self.device.destroy_semaphore(sem, None);
+                }
+                for image in swapchain.images.iter() {
+                    for view in image.views.borrow().values() {
+                        self.device.destroy_image_view(view.handle, None);
+                    }
                 }
                 swapchain.device.destroy_swapchain(swapchain.handle, None);
             }

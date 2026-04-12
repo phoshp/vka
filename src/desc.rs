@@ -2,7 +2,7 @@ use std::ffi::CStr;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 pub struct RenderingDeviceDesc<'a> {
     pub app_name: &'a CStr,
@@ -12,6 +12,15 @@ pub struct RenderingDeviceDesc<'a> {
 }
 
 impl RenderingDeviceDesc<'_> {
+    pub fn with_window(win: &(impl HasDisplayHandle + HasWindowHandle)) -> Self {
+        let rdh = win.display_handle().unwrap().as_raw();
+        let rwh = win.window_handle().unwrap().as_raw();
+        Self {
+            surface: Some((rdh, rwh)),
+            ..Default::default()
+        }
+    }
+
     pub fn with_surface(display: RawDisplayHandle, window: RawWindowHandle) -> Self {
         Self {
             surface: Some((display, window)),
