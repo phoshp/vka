@@ -53,7 +53,7 @@ pub fn main() -> vka::Result<()> {
                         &[rd.image_full_view(&frame)],
                         vk::Rect2D {
                             offset: vk::Offset2D::default(),
-                            extent: vk::Extent2D { width: 800, height: 600 },
+                            extent: rd.get_swapchain_extent(),
                         },
                     );
                     rd.end_render_pass(cmd, &rpass);

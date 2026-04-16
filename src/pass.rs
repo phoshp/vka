@@ -23,8 +23,8 @@ pub struct RenderPass(Handle<RenderPassImpl>);
 pub struct RenderPassImpl {
     pub handle: vk::RenderPass,
 
-    pub framebuffers: RefCell<HashMap<u64, vk::Framebuffer>>,
-    pub images: RefCell<Vec<Image>>,
+    framebuffers: RefCell<HashMap<u64, vk::Framebuffer>>,
+    images: RefCell<Vec<Image>>,
 
     pub clear_values: Vec<vk::ClearValue>,
     pub initial_layouts: Vec<vk::ImageLayout>,
@@ -107,11 +107,6 @@ fn conv_store_op(op: &StoreOp) -> vk::AttachmentStoreOp {
         StoreOp::Store => vk::AttachmentStoreOp::STORE,
         StoreOp::Discard => vk::AttachmentStoreOp::DONT_CARE,
     }
-}
-
-pub struct RenderPassBeginDesc<'a> {
-    pub pass: &'a RenderPass,
-    pub render_area: vk::Rect2D,
 }
 
 impl RenderingDevice {

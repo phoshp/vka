@@ -1,6 +1,7 @@
 #![allow(unused)]
 
-use std::cell::{Cell, RefMut};
+use std::borrow::Cow;
+use std::cell::{Cell, Ref, RefMut};
 use std::{cell::RefCell, ffi::CStr, mem::ManuallyDrop, ops::Deref, rc::Rc, sync::LazyLock};
 
 use ash::ext::debug_utils;
@@ -406,11 +407,11 @@ impl RenderingDevice {
 
     /// Acquires the next available image from the swapchain for rendering. Recreates swapchain if suboptimal.
     pub fn acquire_swapchain_image(&self) -> Option<Image> {
+        if self.suboptimal_swapchain.get() {
+            log::info!("Swapchain is suboptimal, recreating");
+            self.recreate_swapchain();
+        }
         if let Some(swapchain) = self.swapchain.borrow().as_ref() {
-            if self.suboptimal_swapchain.get() {
-                log::info!("Swapchain is suboptimal, recreating");
-                self.recreate_swapchain();
-            }
             let frame = self.frame();
             self.frame_wait_idle(frame);
 
@@ -424,6 +425,14 @@ impl RenderingDevice {
             self.image_index.set(image_index as usize);
         }
         self.swapchain.borrow().as_ref().map(|s| s.images[self.image_index.get()].clone())
+    }
+
+    pub fn swapchain_read<T: Copy + Default>(&self, map: impl FnOnce(&Swapchain) -> T) -> T {
+        self.swapchain.borrow().as_ref().map(map).unwrap_or_default()
+    }
+
+    pub fn get_swapchain_extent(&self) -> vk::Extent2D {
+        self.swapchain.borrow().as_ref().map(|s| s.extent).unwrap_or_default()
     }
 
     /// Gets the current frame's command buffer where rendering commands should be recorded.
