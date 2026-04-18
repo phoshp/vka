@@ -124,8 +124,8 @@ impl Deref for RenderingDevice {
 }
 
 impl RenderingDevice {
-    /// Initializes a new Vulkan rendering device, instances, and necessary Queues/Allocators according to `RenderingDeviceInfo`.
-    pub fn new(info: &RenderingDeviceDesc) -> Result<Self> {
+    /// Initializes a new Vulkan rendering device, instances, and necessary Queues/Allocators according to `RenderingDeviceDesc`.
+    pub fn new(desc: &RenderingDeviceDesc) -> Result<Self> {
         unsafe {
             let vulkan_version = ENTRY.try_enumerate_instance_version()?.unwrap_or(vk::API_VERSION_1_0);
             let enum_layer_props = ENTRY.enumerate_instance_layer_properties()?;
@@ -135,18 +135,18 @@ impl RenderingDevice {
             let available_exts = enum_ext_props.iter().map(|x| x.extension_name_as_c_str().unwrap()).collect_vec();
 
             let app_info = vk::ApplicationInfo::default()
-                .engine_name(info.app_name)
-                .application_name(info.app_name)
+                .engine_name(desc.app_name)
+                .application_name(desc.app_name)
                 .application_version(vk::make_api_version(0, 1, 0, 0))
                 .api_version(vulkan_version);
 
             let mut enabled_layers = Vec::new();
             let mut enabled_instance_exts = vec![vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME];
 
-            if let Some(surface) = info.surface {
+            if let Some(surface) = desc.surface {
                 enabled_instance_exts.extend(ash_window::enumerate_required_extensions(surface.0).unwrap().iter().map(|&x| CStr::from_ptr(x)));
             }
-            let validation_layers_enabled = info.gpu_validation && available_layers.contains(&c"VK_LAYER_KHRONOS_validation") && available_exts.contains(&vk::EXT_DEBUG_UTILS_NAME);
+            let validation_layers_enabled = desc.gpu_validation && available_layers.contains(&c"VK_LAYER_KHRONOS_validation") && available_exts.contains(&vk::EXT_DEBUG_UTILS_NAME);
 
             if validation_layers_enabled {
                 enabled_layers.push(c"VK_LAYER_KHRONOS_validation");
@@ -167,7 +167,7 @@ impl RenderingDevice {
             }
 
             log::info!("Creating vulkan instance:");
-            log::info!("App name: {}", info.app_name.to_str()?);
+            log::info!("App name: {}", desc.app_name.to_str()?);
             log::info!("Vulkan Version: {}", vulkan_version_str(vulkan_version));
             log::info!("Extensions: {}", enabled_instance_exts.iter().map(|&v| v.to_str().unwrap()).join(", "));
             log::info!("Layers: {}", enabled_layers.iter().map(|&v| v.to_str().unwrap()).join(", "));
@@ -202,7 +202,7 @@ impl RenderingDevice {
                 .next()
                 .ok_or(vk::Result::ERROR_UNKNOWN)?;
 
-            if let Some(idx) = info.pick_device {
+            if let Some(idx) = desc.pick_device {
                 if let Some((pd, props)) = found_devices.get(idx) {
                     log::info!("Picking device at specified index {}", idx);
                     phy_device = *pd;
@@ -220,9 +220,9 @@ impl RenderingDevice {
             features = features.push_next(&mut features11).push_next(&mut features12).push_next(&mut features13);
             instance.get_physical_device_features2(phy_device, &mut features);
 
-            features.features.robust_buffer_access &= info.gpu_validation as u32;
+            features.features.robust_buffer_access &= desc.gpu_validation as u32;
 
-            let surface = if let Some((rdh, rwh)) = info.surface {
+            let surface = if let Some((rdh, rwh)) = desc.surface {
                 enabled_device_exts.push(vk::KHR_SWAPCHAIN_NAME);
                 Some(make_surface(&instance, rdh, rwh)?)
             } else {
