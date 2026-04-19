@@ -194,11 +194,11 @@ impl RenderingDevice {
 
     /// Gets or creates a view for a specific mip level and array layer.
     #[inline]
-    pub fn image_view(&self, image: &Image, mip_level: u32, layer: u32) -> ImageView {
+    pub fn image_view(&self, image: &Image, aspect: vk::ImageAspectFlags, mip_level: u32, layer: u32) -> ImageView {
         self.image_view_range(
             image,
             vk::ImageSubresourceRange::default()
-                .aspect_mask(image.aspect)
+                .aspect_mask(aspect)
                 .base_mip_level(mip_level)
                 .level_count(1)
                 .base_array_layer(layer)
