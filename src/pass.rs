@@ -18,6 +18,7 @@ use crate::RenderingDevice;
 use crate::Resource;
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct RenderPass(Handle<RenderPassImpl>);
 
 pub struct RenderPassImpl {

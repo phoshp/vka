@@ -23,6 +23,12 @@ use crate::utils;
 #[repr(transparent)]
 pub struct Buffer(Handle<BufferImpl>);
 
+impl Buffer {
+    pub fn descriptor(&self, offset: u64, range: u64) -> vk::DescriptorBufferInfo {
+        vk::DescriptorBufferInfo { buffer: self.handle, offset, range }
+    }
+}
+
 impl Deref for Buffer {
     type Target = Handle<BufferImpl>;
     fn deref(&self) -> &Self::Target {

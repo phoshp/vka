@@ -86,6 +86,10 @@ impl ImageView {
     pub fn get_image(&self) -> Option<Image> {
         self.image.upgrade().map(Image)
     }
+
+    pub fn descriptor(&self) -> vk::DescriptorImageInfo {
+        vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: self.handle, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }
+    }
 }
 
 pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
