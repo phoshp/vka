@@ -114,10 +114,12 @@ impl RenderingDevice {
             .map(|(ty, count)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(count))
             .collect_vec();
 
+        let mut inline_uniform_ext = vk::DescriptorPoolInlineUniformBlockCreateInfo::default().max_inline_uniform_block_bindings(1);
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
             .max_sets(1)
-            .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND);
+            .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
+            .push_next(&mut inline_uniform_ext);
         let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None)? };
         let set = unsafe {
             self.device
