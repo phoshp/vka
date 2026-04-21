@@ -11,7 +11,11 @@ pub trait AsExtent3D {
 
 impl AsExtent3D for vk::Extent2D {
     fn as_extent3d(&self, depth: u32) -> vk::Extent3D {
-        vk::Extent3D { width: self.width, height: self.height, depth }
+        vk::Extent3D {
+            width: self.width,
+            height: self.height,
+            depth,
+        }
     }
 }
 
