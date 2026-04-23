@@ -137,12 +137,6 @@ impl Deref for RenderingDevice {
     }
 }
 
-impl DerefMut for RenderingDevice {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        Rc::get_mut(&mut self.0).expect("Multiple references to RenderingDeviceImpl exist")
-    }
-}
-
 impl RenderingDevice {
     /// Initializes a new Vulkan rendering device, instances, and necessary Queues/Allocators according to `RenderingDeviceDesc`.
     pub fn new(desc: &RenderingDeviceDesc) -> Result<Self> {
@@ -351,7 +345,7 @@ impl RenderingDevice {
                 })
                 .collect_vec();
 
-            let mut rd = RenderingDevice(Rc::new(RenderingDeviceImpl {
+            let rd = RenderingDevice(Rc::new(RenderingDeviceImpl {
                 instance,
                 device,
                 phy_device,
