@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefMut};
+use std::ops::DerefMut;
 use std::{cell::RefCell, ffi::CStr, mem::ManuallyDrop, ops::Deref, rc::Rc, sync::LazyLock};
 
 use ash::ext::debug_utils;
@@ -12,22 +13,24 @@ use std::sync::Mutex as StdMutex;
 
 mod belt;
 mod buffer;
-mod image;
 mod desc;
 mod descriptor;
+mod image;
+mod mutex;
 mod pass;
-mod program;
+mod pipeline;
 mod resource;
 mod surface;
 mod swapchain;
 mod utils;
 
 pub use buffer::*;
-pub use image::*;
 pub use desc::*;
 pub use descriptor::*;
+pub use image::*;
+pub use mutex::*;
 pub use pass::*;
-pub use program::*;
+pub use pipeline::*;
 pub use resource::*;
 pub use surface::*;
 pub use swapchain::*;
@@ -76,6 +79,17 @@ pub struct Frame {
     pub belt: RefCell<StagingBelt>,
 }
 
+pub struct Presentation {
+    pub surface: Surface,
+    pub surface_config: Cell<SurfaceConfig>,
+    pub swapchain: RefCell<Swapchain>,
+
+    pub semaphores: Vec<vk::Semaphore>,
+    pub image_index: Cell<usize>,
+    pub image_acquired: Cell<bool>,
+    pub suboptimal_swapchain: Cell<bool>,
+}
+
 /// The inner state of a Vulkan rendering device containing the instance, physical device, logical device, and other core resources.
 pub struct RenderingDeviceImpl {
     pub instance: ash::Instance,
@@ -94,11 +108,8 @@ pub struct RenderingDeviceImpl {
 
     pub allocator: ManuallyDrop<StdMutex<Allocator>>,
 
-    pub debug_utils: Option<DebugUtils>,
-    pub surface: Option<Surface>,
-    pub surface_config: Cell<SurfaceConfig>,
-    pub swapchain: RefCell<Option<Swapchain>>,
-    pub suboptimal_swapchain: Cell<bool>,
+    debug_utils: Option<DebugUtils>,
+    presentation: Option<Presentation>,
 
     pub queue_families: QueueFamilies,
     pub graphics_queue: vk::Queue,
@@ -106,7 +117,6 @@ pub struct RenderingDeviceImpl {
 
     pub frames: Vec<Frame>,
     pub frame_index: Cell<usize>,
-    pub image_index: Cell<usize>,
 }
 
 impl Into<RenderingDevice> for Rc<RenderingDeviceImpl> {
@@ -124,6 +134,12 @@ impl Deref for RenderingDevice {
     type Target = RenderingDeviceImpl;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for RenderingDevice {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Rc::get_mut(&mut self.0).expect("Multiple references to RenderingDeviceImpl exist")
     }
 }
 
@@ -335,7 +351,7 @@ impl RenderingDevice {
                 })
                 .collect_vec();
 
-            let rd = RenderingDevice(Rc::new(RenderingDeviceImpl {
+            let mut rd = RenderingDevice(Rc::new(RenderingDeviceImpl {
                 instance,
                 device,
                 phy_device,
@@ -353,10 +369,7 @@ impl RenderingDevice {
                 allocator: ManuallyDrop::new(allocator),
 
                 debug_utils,
-                surface,
-                surface_config: Cell::new(SurfaceConfig::default()),
-                swapchain: RefCell::new(None),
-                suboptimal_swapchain: Cell::new(false),
+                presentation: None,
 
                 queue_families,
                 graphics_queue,
@@ -364,9 +377,31 @@ impl RenderingDevice {
 
                 frames,
                 frame_index: Cell::new(0),
-                image_index: Cell::new(0),
             }));
-            rd.recreate_swapchain();
+
+            rd.wait_queue()?;
+
+            let presentation = surface.map(|s| {
+                let config = SurfaceConfig::default();
+                let swapchain = swapchain::make_swapchain(&rd, &s, config, None).unwrap();
+                let semaphores = (0..swapchain.images.len())
+                    .map(|_| rd.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap())
+                    .collect_vec();
+                Presentation {
+                    surface: s,
+                    surface_config: Cell::new(config),
+                    swapchain: RefCell::new(swapchain),
+
+                    semaphores,
+                    image_index: Cell::new(0),
+                    image_acquired: Cell::new(false),
+                    suboptimal_swapchain: Cell::new(false),
+                }
+            });
+            unsafe {
+                let ptr = Rc::as_ptr(&rd.0) as *mut RenderingDeviceImpl;
+                (*ptr).presentation = presentation;
+            }
 
             Result::Ok(rd)
         }
@@ -374,21 +409,21 @@ impl RenderingDevice {
 
     /// Updates the swapchain surface configuration and recreates the swapchain.
     pub fn reconfigure_surface(&self, config: SurfaceConfig) {
-        self.surface_config.set(config);
+        self.presentation.as_ref().inspect(|p| p.surface_config.set(config));
         self.recreate_swapchain();
     }
 
     pub fn recreate_swapchain(&self) {
         unsafe {
-            if self.surface.is_none() {
-                return;
-            }
-            self.device.device_wait_idle();
-            self.suboptimal_swapchain.set(false);
-            let old_swapchain = self.swapchain.borrow().as_ref().map(|s| s.handle);
-            self.swapchain.replace(Some(swapchain::make_swapchain(self, old_swapchain).unwrap()));
-            if let Some(old) = old_swapchain {
-                self.swapchain.borrow().as_ref().unwrap().device.destroy_swapchain(old, None);
+            if let Some(p) = &self.presentation {
+                self.device.device_wait_idle();
+                p.suboptimal_swapchain.set(false);
+
+                p.swapchain.replace_with(|old| unsafe {
+                    let new_swapchain = swapchain::make_swapchain(self, &p.surface, p.surface_config.get(), Some(old.handle)).unwrap();
+                    old.device.destroy_swapchain(old.handle, None);
+                    new_swapchain
+                });
             }
         }
     }
@@ -411,32 +446,44 @@ impl RenderingDevice {
 
     /// Acquires the next available image from the swapchain for rendering. Recreates swapchain if suboptimal.
     pub fn acquire_swapchain_image(&self) -> Option<Image> {
-        if self.suboptimal_swapchain.get() {
+        let p = match self.presentation.as_ref() {
+            Some(p) => p,
+            None => return None,
+        };
+        if p.suboptimal_swapchain.get() {
             log::info!("Swapchain is suboptimal, recreating");
             self.recreate_swapchain();
         }
-        if let Some(swapchain) = self.swapchain.borrow().as_ref() {
-            let frame = self.frame();
-            self.frame_wait_idle(frame);
+        let frame = self.frame();
+        self.frame_wait_idle(frame);
+        let swapchain = p.swapchain.borrow();
+        let (image_index, suboptimal) = unsafe {
+            swapchain
+                .device
+                .acquire_next_image(swapchain.handle, u64::MAX, frame.image_semaphore, vk::Fence::null())
+                .unwrap()
+        };
+        p.suboptimal_swapchain.set(p.suboptimal_swapchain.get() || suboptimal);
+        p.image_acquired.set(true);
+        p.image_index.set(image_index as usize);
 
-            let (image_index, suboptimal) = unsafe {
-                swapchain
-                    .device
-                    .acquire_next_image(swapchain.handle, u64::MAX, frame.image_semaphore, vk::Fence::null())
-                    .unwrap()
-            };
-            self.suboptimal_swapchain.set(self.suboptimal_swapchain.get() || suboptimal);
-            self.image_index.set(image_index as usize);
-        }
-        self.swapchain.borrow().as_ref().map(|s| s.images[self.image_index.get()].clone())
+        Some(swapchain.images[image_index as usize].clone())
     }
 
-    pub fn swapchain_read<T: Copy + Default>(&self, map: impl FnOnce(&Swapchain) -> T) -> T {
-        self.swapchain.borrow().as_ref().map(map).unwrap_or_default()
+    pub fn debug_utils(&self) -> Option<&DebugUtils> {
+        self.debug_utils.as_ref()
+    }
+
+    pub fn presentation(&self) -> Option<&Presentation> {
+        self.presentation.as_ref()
+    }
+
+    pub fn is_image_acquired(&self) -> bool {
+        self.presentation().map(|p| p.image_acquired.get()).unwrap_or(false)
     }
 
     pub fn get_swapchain_extent(&self) -> vk::Extent2D {
-        self.swapchain.borrow().as_ref().map(|s| s.extent).unwrap_or_default()
+        self.presentation().map(|p| p.swapchain.borrow().extent).unwrap_or_default()
     }
 
     /// Gets the current frame's command buffer where rendering commands should be recorded.
@@ -460,15 +507,23 @@ impl RenderingDevice {
 
             self.device.end_command_buffer(frame.front_cmd.get()).unwrap();
 
-            let wait_semaphore = self.surface.is_some().then(|| frame.image_semaphore);
-            let present_semaphore = self.swapchain.borrow().as_ref().map(|s| s.present_semaphores[self.image_index.get()]);
+            let cmd_buffers = [frame.front_cmd.get()];
+            let wait_semaphores = self.is_image_acquired().then(|| frame.image_semaphore);
+            let signal_semaphores = self.is_image_acquired().then(|| {
+                self.presentation()
+                    .map(|p| p.semaphores[p.image_index.get()])
+                    .unwrap()
+            });
+
+            let mut submit_info = vk::SubmitInfo::default()
+                .command_buffers(&cmd_buffers)
+                .wait_dst_stage_mask(&[vk::PipelineStageFlags::ALL_COMMANDS])
+                .wait_semaphores(wait_semaphores.as_slice())
+                .signal_semaphores(signal_semaphores.as_slice());
+
             self.device.queue_submit(
                 self.graphics_queue,
-                &[vk::SubmitInfo::default()
-                    .command_buffers(&[frame.front_cmd.get()])
-                    .wait_dst_stage_mask(&[vk::PipelineStageFlags::ALL_COMMANDS])
-                    .wait_semaphores(wait_semaphore.as_ref().map(|s| std::slice::from_ref(s)).unwrap_or(&[]))
-                    .signal_semaphores(present_semaphore.as_ref().map(|s| std::slice::from_ref(s)).unwrap_or(&[]))],
+                &[submit_info],
                 frame.fence,
             )?;
 
@@ -498,20 +553,23 @@ impl RenderingDevice {
 
     /// Presents the last rendered frame to the swapchain.
     pub fn present(&self) -> Result<()> {
-        if let Some(swapchain) = self.swapchain.borrow().as_ref() {
+        if let Some(p) = &self.presentation {
+            let swapchain = p.swapchain.borrow();
+            let image_index = p.image_index.get();
+
             let suboptimal = unsafe {
                 swapchain
                     .device
                     .queue_present(
                         self.present_queue,
                         &vk::PresentInfoKHR::default()
-                            .wait_semaphores(&[swapchain.present_semaphores[self.image_index.get()]])
+                            .wait_semaphores(&[p.semaphores[image_index]])
                             .swapchains(&[swapchain.handle])
-                            .image_indices(&[self.image_index.get() as u32]),
-                    )
-                    .unwrap()
+                            .image_indices(&[image_index as u32]),
+                    )?
             };
-            self.suboptimal_swapchain.set(self.suboptimal_swapchain.get() || suboptimal);
+            p.image_acquired.set(false);
+            p.suboptimal_swapchain.set(p.suboptimal_swapchain.get() || suboptimal);
         }
         Result::Ok(())
     }
@@ -684,7 +742,7 @@ impl Drop for RenderingDeviceImpl {
                 self.device.destroy_fence(frame.fence, None);
                 self.device.destroy_semaphore(frame.image_semaphore, None);
                 self.device.destroy_command_pool(frame.cmd_pool, None);
-                
+
                 for chunk in frame.belt.borrow_mut().active_chunks.iter_mut() {
                     Rc::get_mut(&mut chunk.buffer).unwrap().destroy(self);
                 }
@@ -692,19 +750,18 @@ impl Drop for RenderingDeviceImpl {
                     Rc::get_mut(&mut readback).unwrap().destroy(self);
                 }
             }
-            if let Some(swapchain) = self.swapchain.borrow().as_ref() {
-                for &sem in swapchain.present_semaphores.iter() {
+            if let Some(p) = &self.presentation {
+                for &sem in p.semaphores.iter() {
                     self.device.destroy_semaphore(sem, None);
                 }
+                let swapchain = p.swapchain.borrow();
                 for image in swapchain.images.iter() {
                     for view in image.views.borrow().values() {
                         self.device.destroy_image_view(view.handle, None);
                     }
                 }
                 swapchain.device.destroy_swapchain(swapchain.handle, None);
-            }
-            if let Some(surface) = &self.surface {
-                surface.instance.destroy_surface(surface.handle, None);
+                p.surface.instance.destroy_surface(p.surface.handle, None);
             }
             ManuallyDrop::drop(&mut self.allocator);
             self.device.destroy_device(None);

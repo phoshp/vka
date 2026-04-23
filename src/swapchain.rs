@@ -6,6 +6,8 @@ use crate::AsExtent3D;
 use crate::Image;
 use crate::RenderingDevice;
 use crate::Result;
+use crate::Surface;
+use crate::SurfaceConfig;
 
 /// Encapsulates the Vulkan swapchain and its associated images for presentation to a window surface.
 pub struct Swapchain {
@@ -17,8 +19,6 @@ pub struct Swapchain {
     pub format: vk::Format,
     pub color_space: vk::ColorSpaceKHR,
     pub present_mode: vk::PresentModeKHR,
-
-    pub present_semaphores: Vec<vk::Semaphore>,
 }
 
 fn present_mode_str(mode: vk::PresentModeKHR) -> &'static str {
@@ -32,12 +32,10 @@ fn present_mode_str(mode: vk::PresentModeKHR) -> &'static str {
 }
 
 /// Factory function to create or recreate a swapchain based on the current surface configuration.
-pub fn make_swapchain(rd: &RenderingDevice, old_swapchain: Option<vk::SwapchainKHR>) -> Result<Swapchain> {
+pub fn make_swapchain(rd: &RenderingDevice, surface: &Surface, config: SurfaceConfig, old_swapchain: Option<vk::SwapchainKHR>) -> Result<Swapchain> {
     unsafe {
         let device = &rd.device;
         let instance = &rd.instance;
-        let surface = rd.surface.as_ref().unwrap();
-        let config = rd.surface_config.get();
 
         let device = ash::khr::swapchain::Device::new(instance, device);
         let present_modes = surface.instance.get_physical_device_surface_present_modes(rd.phy_device, surface.handle)?;
@@ -119,10 +117,6 @@ pub fn make_swapchain(rd: &RenderingDevice, old_swapchain: Option<vk::SwapchainK
             })
             .collect_vec();
 
-        let present_semaphores = (0..image_count)
-            .map(|i| rd.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap())
-            .collect_vec();
-
         Ok(Swapchain {
             handle: swapchain,
             device,
@@ -131,7 +125,6 @@ pub fn make_swapchain(rd: &RenderingDevice, old_swapchain: Option<vk::SwapchainK
             format,
             color_space,
             present_mode,
-            present_semaphores
         })
     }
 }
