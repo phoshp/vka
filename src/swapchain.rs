@@ -99,6 +99,10 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: &Surface, config: SurfaceCo
                 .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null())),
             None,
         )?;
+        if let Some(old) = old_swapchain {
+            device.destroy_swapchain(old, None);
+        }
+
         let images = device
             .get_swapchain_images(swapchain)?
             .iter()

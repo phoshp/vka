@@ -13,7 +13,7 @@ pub fn main() -> vka::Result<()> {
     let event_loop = winit::event_loop::EventLoop::new()?;
     let window = event_loop.create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))?;
     let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window))?;
-    let color_image = rd.image_create(
+    let mut color_image = rd.image_create(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
             .samples(4)
             .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
@@ -185,6 +185,16 @@ pub fn main() -> vka::Result<()> {
                     fps_timer = Instant::now();
                 }
 
+                window.request_redraw();
+            }
+            winit::event::WindowEvent::Resized(s) => {
+                log::info!("Resized to {}x{}", s.width, s.height);
+                rd.reconfigure_surface(SurfaceConfig { width: s.width, height: s.height, vsync: false });
+                color_image = rd.image_create(
+                    &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, s.width, s.height)
+                        .samples(4)
+                        .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
+                ).unwrap();
                 window.request_redraw();
             }
             winit::event::WindowEvent::CloseRequested => {

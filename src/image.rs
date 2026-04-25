@@ -174,7 +174,9 @@ impl RenderingDevice {
                 for view in res.views.borrow().values() {
                     rd.device.destroy_image_view(view.handle, None);
                 }
-                rd.device.destroy_image(res.handle, None);
+                if !res.alloc.is_null() {
+                    rd.device.destroy_image(res.handle, None);
+                }
             },
         ))
     }
