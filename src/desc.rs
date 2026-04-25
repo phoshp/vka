@@ -7,6 +7,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, Raw
 pub struct RenderingDeviceDesc<'a> {
     pub app_name: &'a CStr,
     pub gpu_validation: bool,
+    pub n_frames: usize,
     pub pick_device: Option<usize>,                             // index for picking a specific device
     pub surface: Option<(RawDisplayHandle, RawWindowHandle)>, // None for headless setup
 }
@@ -34,6 +35,11 @@ impl RenderingDeviceDesc<'_> {
             ..self
         }
     }
+
+    pub fn with_frames(mut self, frames: usize) -> Self {
+        self.n_frames = frames;
+        self
+    }
 }
 
 impl Default for RenderingDeviceDesc<'_> {
@@ -41,6 +47,7 @@ impl Default for RenderingDeviceDesc<'_> {
         Self {
             app_name: c"vka app",
             gpu_validation: false,
+            n_frames: 2,
             pick_device: None,
             surface: None,
         }

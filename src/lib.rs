@@ -314,8 +314,7 @@ impl RenderingDevice {
                 .unwrap(),
             );
 
-            let n_frames = 2; // TODO: make it configurable
-            let frames = (0..n_frames)
+            let frames = (0..desc.n_frames)
                 .map(|_| unsafe {
                     let cmd_pool = device
                         .create_command_pool(
