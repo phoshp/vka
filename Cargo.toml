@@ -8,7 +8,7 @@ documentation = "https://docs.rs/vka"
 homepage = "https://github.com/phoshp/vka"
 repository = "https://github.com/phoshp/vka"
 keywords = ["vulkan", "graphics", "rendering", "low-level"]
-categories = ["game-engine", "graphics", "vulkan"]
+categories = ["graphics"]
 
 [dependencies]
 anyhow = "1.0.102"
