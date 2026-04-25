@@ -15,8 +15,8 @@ pub fn main() -> vka::Result<()> {
     let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window))?;
     let color_image = rd.image_create(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
-            .samples(1)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
+            .samples(4)
+            .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
     )?;
 
     let rpass = rd.render_pass_create(&RenderPassDesc {
@@ -40,7 +40,7 @@ pub fn main() -> vka::Result<()> {
                     load: LoadOp::Discard,
                     store: StoreOp::Store,
                 },
-            },
+            }
         ],
         subpasses: &[Subpass {
             colors: &[(0, Some(1))],
@@ -195,12 +195,15 @@ pub fn main() -> vka::Result<()> {
         _ => (),
     });
 
-    let mut data = vec![0u8; 400 * 400 * 4];
+    rd.wait_queue()?;
+
+    let image = rd.acquire_swapchain_image().unwrap();
+    let mut data = vec![0u8; 800 * 400 * 4 * image.samples.as_raw() as usize];
     rd.read_image(
-        &color_image,
+        &image,
         &mut data,
         vk::Offset3D { x: 64, y: 64, z: 0 },
-        vk::Extent3D { width: 400, height: 400, depth: 1 },
+        vk::Extent3D { width: 800, height: 400, depth: 1 },
         4,
         vk::ImageSubresourceLayers {
             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -209,7 +212,7 @@ pub fn main() -> vka::Result<()> {
             layer_count: 1,
         },
     )?;
-    let mut native_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(400, 400, data.as_mut()).unwrap();
+    let mut native_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(800, 400, data.as_mut()).unwrap();
     native_img.save("examples/frame.png")?;
     println!("Saved frame.png");
 

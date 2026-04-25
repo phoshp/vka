@@ -58,16 +58,6 @@ impl RenderingDevice {
 
     pub fn buffer_from_info(&self, mut info: vk::BufferCreateInfo, location: MemoryLocation) -> Result<Buffer> {
         unsafe {
-            let alignment = if info.usage.contains(vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER) {
-                self.properties.limits.min_texel_buffer_offset_alignment
-            } else if info.usage.contains(vk::BufferUsageFlags::UNIFORM_BUFFER) {
-                self.properties.limits.min_uniform_buffer_offset_alignment
-            } else if info.usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER) {
-                self.properties.limits.min_storage_buffer_offset_alignment
-            } else {
-                4
-            };
-            info.size = utils::align_up(info.size, alignment);
             info.usage |= vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
             let buffer = self.device.create_buffer(&info, None)?;
             let mem_reqs = self.device.get_buffer_memory_requirements(buffer);
