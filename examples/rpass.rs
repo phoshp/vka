@@ -79,18 +79,5 @@ pub fn main() -> vka::Result<()> {
         },
         _ => (),
     });
-
-    //
-    //
-    //
-    //
-    // // read the rendered image back.
-    // let mut image_raw_data = [0u8; 128 * 128 * 4];
-    // rd.read_image(&color_image, &mut image_raw_data, 4)?;
-    //
-    // let mut img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(128, 128, image_raw_data.as_mut()).unwrap();
-    // img.save("examples/rpass.png")?;
-    // println!("Saved rpass.png");
-    //
     Ok(())
 }

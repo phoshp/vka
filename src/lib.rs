@@ -5,6 +5,7 @@ use std::cell::{Cell, Ref, RefMut};
 use std::ops::DerefMut;
 use std::{cell::RefCell, ffi::CStr, mem::ManuallyDrop, ops::Deref, rc::Rc, sync::LazyLock};
 
+use anyhow::{anyhow};
 use ash::ext::debug_utils;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
@@ -503,11 +504,7 @@ impl RenderingDevice {
 
             let cmd_buffers = [frame.front_cmd.get()];
             let wait_semaphores = self.is_image_acquired().then(|| frame.image_semaphore);
-            let signal_semaphores = self.is_image_acquired().then(|| {
-                self.presentation()
-                    .map(|p| p.semaphores[p.image_index.get()])
-                    .unwrap()
-            });
+            let signal_semaphores = self.is_image_acquired().then(|| self.presentation().map(|p| p.semaphores[p.image_index.get()]).unwrap());
 
             let mut submit_info = vk::SubmitInfo::default()
                 .command_buffers(&cmd_buffers)
@@ -515,11 +512,7 @@ impl RenderingDevice {
                 .wait_semaphores(wait_semaphores.as_slice())
                 .signal_semaphores(signal_semaphores.as_slice());
 
-            self.device.queue_submit(
-                self.graphics_queue,
-                &[submit_info],
-                frame.fence,
-            )?;
+            self.device.queue_submit(self.graphics_queue, &[submit_info], frame.fence)?;
 
             self.device.reset_command_buffer(frame.back_cmd.get(), vk::CommandBufferResetFlags::empty())?;
             frame.front_cmd.swap(&frame.back_cmd);
@@ -552,15 +545,13 @@ impl RenderingDevice {
             let image_index = p.image_index.get();
 
             let suboptimal = unsafe {
-                swapchain
-                    .device
-                    .queue_present(
-                        self.present_queue,
-                        &vk::PresentInfoKHR::default()
-                            .wait_semaphores(&[p.semaphores[image_index]])
-                            .swapchains(&[swapchain.handle])
-                            .image_indices(&[image_index as u32]),
-                    )?
+                swapchain.device.queue_present(
+                    self.present_queue,
+                    &vk::PresentInfoKHR::default()
+                        .wait_semaphores(&[p.semaphores[image_index]])
+                        .swapchains(&[swapchain.handle])
+                        .image_indices(&[image_index as u32]),
+                )?
             };
             p.image_acquired.set(false);
             p.suboptimal_swapchain.set(p.suboptimal_swapchain.get() || suboptimal);
@@ -569,51 +560,73 @@ impl RenderingDevice {
     }
 
     pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> Result<()> {
-        let ptr = { self.frame().belt.borrow_mut().read_buffer(self, buffer, offset, data.len() as u64)? };
-        let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
+        let (staging_buffer, ptr) = self.frame().belt.borrow_mut().download(self, data.len() as u64)?;
+        self.copy_buffer(
+            buffer,
+            &staging_buffer,
+            &[vk::BufferCopy {
+                src_offset: offset,
+                dst_offset: 0,
+                size: data.len() as u64,
+            }],
+        );
         self.submit_wait()?;
+        let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         data.copy_from_slice(read);
         Result::Ok(())
     }
 
-    pub fn read_image(&self, image: &Image, data: &mut [u8], bytes_per_pixel: u64) -> Result<()> {
-        let ptr = {
-            self.frame().belt.borrow_mut().read_image(
-                self,
-                image,
-                bytes_per_pixel,
-                &vk::BufferImageCopy::default()
-                    .image_extent(vk::Extent3D {
-                        width: image.extent.width,
-                        height: image.extent.height,
-                        depth: image.extent.depth,
-                    })
-                    .image_subresource(vk::ImageSubresourceLayers {
-                        aspect_mask: image.aspect,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    }),
-            )?
-        };
-        let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
-        self.submit_wait()?;
-        data.copy_from_slice(read);
-        Result::Ok(())
-    }
-
-    pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) {
-        if let Some((staging_buf, cursor, size)) = self.frame().belt.borrow_mut().write(self, bytes_of(data)) {
-            self.record(|dev, cmd| unsafe {
-                dev.cmd_copy_buffer(
-                    cmd,
-                    staging_buf.handle,
-                    buffer.handle,
-                    &[vk::BufferCopy::default().src_offset(cursor).dst_offset(offset).size(size)],
-                );
-                self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-            });
+    pub fn read_image(
+        &self,
+        image: &Image,
+        data: &mut [u8],
+        offset: vk::Offset3D,
+        extent: vk::Extent3D,
+        bytes_per_pixel: u64,
+        subresource: vk::ImageSubresourceLayers,
+    ) -> Result<()> {
+        let size = extent.width as u64 * extent.height as u64 * extent.depth as u64 * bytes_per_pixel * subresource.layer_count as u64;
+        if size != data.len() as u64 {
+            return Err(anyhow!("Data buffer size does not match image region size"));
         }
+        let (staging_buffer, ptr) = self.frame().belt.borrow_mut().download(self, size)?;
+
+        self.record(|dev, cmd| unsafe {
+            let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            dev.cmd_copy_image_to_buffer(
+                cmd,
+                image.handle,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                staging_buffer.handle,
+                &[vk::BufferImageCopy::default()
+                    .image_offset(offset)
+                    .image_extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: extent.depth,
+                    })
+                    .image_subresource(subresource)],
+            );
+            self.barrier_image(cmd, image, prev);
+        });
+        let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
+        self.submit_wait()?;
+        data.copy_from_slice(read);
+        Result::Ok(())
+    }
+
+    pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) -> Result<()> {
+        let (staging_buf, cursor, size) = self.frame().belt.borrow_mut().upload(self, bytes_of(data))?;
+        self.record(|dev, cmd| unsafe {
+            dev.cmd_copy_buffer(
+                cmd,
+                staging_buf.handle,
+                buffer.handle,
+                &[vk::BufferCopy::default().src_offset(cursor).dst_offset(offset).size(size)],
+            );
+            self.barrier(cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+        Result::Ok(())
     }
 
     pub fn write_image<T>(
@@ -624,24 +637,24 @@ impl RenderingDevice {
         extent: vk::Extent3D,
         subresource: vk::ImageSubresourceLayers,
         new_layout: Option<vk::ImageLayout>,
-    ) {
-        if let Some((staging_buf, cursor, size)) = self.frame().belt.borrow_mut().write(self, bytes_of(data)) {
-            self.record(|dev, cmd| unsafe {
-                let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-                dev.cmd_copy_buffer_to_image(
-                    cmd,
-                    staging_buf.handle,
-                    image.handle,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[vk::BufferImageCopy::default()
-                        .buffer_offset(cursor)
-                        .image_subresource(subresource)
-                        .image_offset(offset)
-                        .image_extent(extent)],
-                );
-                self.barrier_image(cmd, image, new_layout.unwrap_or(prev));
-            });
-        }
+    ) -> Result<()> {
+        let (staging_buf, cursor, size) = self.frame().belt.borrow_mut().upload(self, bytes_of(data))?;
+        self.record(|dev, cmd| unsafe {
+            let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            dev.cmd_copy_buffer_to_image(
+                cmd,
+                staging_buf.handle,
+                image.handle,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::BufferImageCopy::default()
+                    .buffer_offset(cursor)
+                    .image_subresource(subresource)
+                    .image_offset(offset)
+                    .image_extent(extent)],
+            );
+            self.barrier_image(cmd, image, new_layout.unwrap_or(prev));
+        });
+        Result::Ok(())
     }
 
     pub fn init_image<T>(&self, image: &Image, data: &[T]) {
@@ -656,7 +669,7 @@ impl RenderingDevice {
             } else {
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
             }),
-        )
+        );
     }
 
     pub fn copy_buffer(&self, src_buf: &Buffer, dst_buf: &Buffer, regions: &[vk::BufferCopy]) {
