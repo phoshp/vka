@@ -5,13 +5,15 @@ use std::fmt::Display;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ops::Range;
-use std::rc::Rc;
-use std::rc::Weak;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
+use parking_lot::Mutex;
 
 use crate::RenderingDevice;
 use crate::RenderingDeviceImpl;
@@ -19,15 +21,15 @@ use crate::image::Image;
 
 /// A ref-counted handle to a GPU resource, such as a buffer or an image.
 /// It holds the resource value, its allocation (if any), and a weak reference to the rendering device for cleanup purposes.
-pub type Handle<T> = Rc<Resource<T>>;
+pub type Handle<T> = Arc<Resource<T>>;
 pub type WeakHandle<T> = Weak<Resource<T>>;
 
 pub struct Resource<T> {
     pub value: T,
     pub alloc: Allocation,
-    pub device: Weak<RenderingDeviceImpl>,
+    device: Weak<RenderingDeviceImpl>,
+    name: OnceLock<String>,
     id: u64,
-    name: OnceCell<String>,
     dtor: Option<Box<dyn FnMut(&mut Self, &RenderingDeviceImpl)>>,
 }
 
@@ -41,29 +43,23 @@ impl<T> Deref for Resource<T> {
 static RES_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl<T> Resource<T> {
-
     /// Spawns a new ref-counted handling mapping `value`, an allocation, and its destructor closure.
     pub fn new(rd: &RenderingDevice, value: T, alloc: Option<Allocation>, dtor: impl FnMut(&mut Resource<T>, &RenderingDeviceImpl) + 'static) -> Handle<T> {
-        let device = Rc::downgrade(&rd.0);
-        Rc::new(Self {
+        Arc::new(Self {
             value,
-            alloc: alloc.unwrap_or(Allocation::default()),
-            device,
+            alloc: alloc.unwrap_or_default(),
+            device: Arc::downgrade(&rd.0),
+            name: OnceLock::new(),
             id: RES_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
-            name: OnceCell::new(),
             dtor: Some(Box::new(dtor)),
         })
-    }
-
-    pub fn internal(rd: &RenderingDevice, value: T) -> Handle<T> {
-        Self::new(rd, value, None, |_, _| {})
     }
 
     pub fn id(&self) -> u64 {
         self.id
     }
 
-    pub fn get_name(&self) -> &str {
+    pub fn name(&self) -> &str {
         self.name.get().map(|s| s.as_str()).unwrap_or("unnamed")
     }
 
@@ -71,7 +67,7 @@ impl<T> Resource<T> {
         self.name.set(name.into());
     }
 
-    pub fn rendering_device(&self) -> Option<RenderingDevice> {
+    pub fn device(&self) -> Option<RenderingDevice> {
         self.device.upgrade().map(RenderingDevice)
     }
 
@@ -88,17 +84,19 @@ impl<T> Resource<T> {
 
     /// Immediately invokes the destructor and frees the resource and memory.
     pub fn destroy(&mut self, rd: &RenderingDeviceImpl) {
-        let res_name = format!("{} (RID:{})", self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()), self.id);
-        log::debug!("Dropping {}", res_name);
+        if self.dtor.is_none() {
+            return; // already destroyed
+        }
+        log::debug!("Destroying {} (RID:{})", self.name.get().map_or(std::any::type_name::<T>(), |s| s.as_str()), self.id);
         // hmm, not the best way, maybe we can use deferred cleanup.
         unsafe {
-            rd.device.queue_wait_idle(rd.graphics_queue).unwrap();
+            rd.device.queue_wait_idle(rd.graphics_queue);
         }
 
-        let alloc = std::mem::take(&mut self.alloc);
         if let Some(mut dtor) = self.dtor.take() {
             dtor(self, &rd);
         }
+        let alloc = std::mem::take(&mut self.alloc);
         if !alloc.is_null() {
             rd.allocator.lock().unwrap().free(alloc);
         }
@@ -115,7 +113,11 @@ impl<T> Drop for Resource<T> {
 
 impl<T: Debug> fmt::Debug for Resource<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Resource").field("handle", &self.value).field("name", &self.get_name()).finish()
+        f.debug_struct("Resource")
+            .field("handle", &self.value)
+            .field("id", &self.id)
+            .field("name", &self.name())
+            .finish()
     }
 }
 
@@ -137,16 +139,18 @@ impl RenderingDevice {
     pub fn barrier_image(&self, cmd: vk::CommandBuffer, image: &Image, mut new_layout: vk::ImageLayout) -> vk::ImageLayout {
         // Transitioning to undefined is not valid
         // also might be triggered by the first image write operations due to how we handle it.
-        let old_layout = image.layout.get();
+        let mut layout = image.layout.lock();
+        let old_layout = *layout;
         if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
             new_layout = old_layout; // so, just skip layout transition, only a memory barrier.
         }
-        self.barrier_image_from(cmd, image.handle, image.aspect, old_layout, new_layout);
-        image.layout.set(new_layout);
+        self.barrier_image_raw(cmd, image.handle, image.aspect, old_layout, new_layout);
+        *layout = new_layout;
         old_layout
     }
 
-    pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
+    /// Do not use this directly its not guaranteed to be thread-safe, use barrier_image instead.
+    pub fn barrier_image_raw(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
         unsafe {
             if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
                 new_layout = old_layout;

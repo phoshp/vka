@@ -1,14 +1,13 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
-use std::rc::Rc;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::Allocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
 use gpu_allocator::vulkan::AllocationScheme;
+use parking_lot::Mutex;
 
 use crate::BufferDesc;
 use crate::Handle;
@@ -47,7 +46,7 @@ pub struct BufferImpl {
     pub handle: vk::Buffer,
     pub size: vk::DeviceSize,
     pub usage: vk::BufferUsageFlags,
-    pub views: RefCell<HashMap<u64, vk::BufferView>>,
+    pub views: Mutex<HashMap<u64, vk::BufferView>>,
 }
 
 impl RenderingDevice {
@@ -85,11 +84,11 @@ impl RenderingDevice {
                 handle: buffer,
                 size,
                 usage,
-                views: RefCell::new(HashMap::new()),
+                views: Mutex::new(HashMap::new()),
             },
             alloc,
             |res, rd| unsafe {
-                for view in res.views.borrow().values() {
+                for view in res.views.lock().values() {
                     rd.device.destroy_buffer_view(*view, None);
                 }
                 rd.device.destroy_buffer(res.value.handle, None);
@@ -112,11 +111,11 @@ impl RenderingDevice {
 
     pub fn buffer_view_with(&self, buffer: &Buffer, info: &vk::BufferViewCreateInfo) -> Result<vk::BufferView> {
         let hash = utils::hash_struct(info);
-        if let Some(view) = buffer.views.borrow().get(&hash) {
+        if let Some(view) = buffer.views.lock().get(&hash) {
             return Result::Ok(*view);
         }
         let view = unsafe { self.device.create_buffer_view(info, None)? };
-        buffer.views.borrow_mut().insert(hash, view);
+        buffer.views.lock().insert(hash, view);
         Result::Ok(view)
     }
 }

@@ -1,5 +1,6 @@
 use std::ffi::CString;
 use std::ops::Deref;
+use std::ops::DerefMut;
 
 use ash::vk;
 use itertools::Itertools;
@@ -20,6 +21,12 @@ impl Deref for PipelineLayout {
     }
 }
 
+impl DerefMut for PipelineLayout {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 pub struct PipelineLayoutImpl {
     pub handle: vk::PipelineLayout,
     pub set_layouts: Vec<super::DescriptorSetLayout>,
@@ -33,6 +40,12 @@ impl Deref for GraphicsPipeline {
     type Target = Handle<GraphicsPipelineImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for GraphicsPipeline {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -51,6 +64,12 @@ impl Deref for ComputePipeline {
     type Target = Handle<ComputePipelineImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for ComputePipeline {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 

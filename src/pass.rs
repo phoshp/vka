@@ -1,15 +1,15 @@
-use std::cell::Cell;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::ops::Deref;
+use std::ops::DerefMut;
 
 use ash::vk;
 use ash::vk::Extent2D;
 use glam::Vec4;
 use itertools::Itertools;
+use parking_lot::Mutex;
 
 use crate::Handle;
 use crate::Image;
@@ -24,8 +24,8 @@ pub struct RenderPass(Handle<RenderPassImpl>);
 pub struct RenderPassImpl {
     pub handle: vk::RenderPass,
 
-    framebuffers: RefCell<HashMap<u64, vk::Framebuffer>>,
-    images: RefCell<Vec<Image>>,
+    framebuffers: Mutex<HashMap<u64, vk::Framebuffer>>,
+    images: Mutex<Vec<Image>>,
 
     pub clear_values: Vec<vk::ClearValue>,
     pub initial_layouts: Vec<vk::ImageLayout>,
@@ -36,6 +36,12 @@ impl Deref for RenderPass {
     type Target = Handle<RenderPassImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for RenderPass {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -246,14 +252,14 @@ impl RenderingDevice {
             handle: raw,
             framebuffers: Default::default(),
 
-            images: RefCell::new(Vec::with_capacity(attachments.len())),
+            images: Mutex::new(Vec::with_capacity(attachments.len())),
             clear_values,
             initial_layouts,
             final_layouts,
         };
 
         RenderPass(Resource::new(self, rpass, None, |res, rd| unsafe {
-            for fb in res.framebuffers.borrow().values() {
+            for fb in res.framebuffers.lock().values() {
                 rd.device.destroy_framebuffer(*fb, None);
             }
             rd.device.destroy_render_pass(res.handle, None);
@@ -262,13 +268,13 @@ impl RenderingDevice {
 
     pub fn begin_render_pass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass, views: &[&ImageView], area: vk::Rect2D) {
         unsafe {
-            let mut images = rpass.images.borrow_mut();
+            let mut images = rpass.images.lock();
             images.clear();
             images.extend(views.iter().map(|i| i.get_image().expect("attachment image must be valid")));
 
             for (i, t) in images.iter().enumerate() {
                 let init_layout = rpass.initial_layouts[i];
-                if t.layout.get() != init_layout && init_layout != vk::ImageLayout::UNDEFINED {
+                if init_layout != vk::ImageLayout::UNDEFINED {
                     self.barrier_image(cmd, t, init_layout);
                 }
             }
@@ -282,7 +288,7 @@ impl RenderingDevice {
             views.iter().for_each(|t| t.id.hash(&mut hasher));
             let framebuffer_key = hasher.finish();
 
-            let framebuffer = *rpass.framebuffers.borrow_mut().entry(framebuffer_key).or_insert_with(|| unsafe {
+            let framebuffer = *rpass.framebuffers.lock().entry(framebuffer_key).or_insert_with(|| unsafe {
                 self.device
                     .create_framebuffer(
                         &vk::FramebufferCreateInfo::default()
@@ -309,12 +315,10 @@ impl RenderingDevice {
     }
 
     pub fn next_subpass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass) {
-        for (i, t) in rpass.images.borrow().iter().enumerate() {
+        for (i, t) in rpass.images.lock().iter().enumerate() {
             // we assumed image layouts of attachments remain same during whole pass, so guarantee this inside next subpass
             let required_layout = rpass.initial_layouts[i];
-            if t.layout.get() != required_layout {
-                self.barrier_image(cmd, t, required_layout);
-            }
+            self.barrier_image(cmd, t, required_layout);
         }
         unsafe {
             self.device.cmd_next_subpass(cmd, vk::SubpassContents::INLINE);
@@ -325,8 +329,8 @@ impl RenderingDevice {
         unsafe {
             self.device.cmd_end_render_pass(cmd);
         }
-        for (i, t) in rpass.images.borrow().iter().enumerate() {
-            t.assume_layout(rpass.final_layouts[i]);
+        for (i, t) in rpass.images.lock().iter().enumerate() {
+            *t.layout.lock() = rpass.final_layouts[i];
         }
     }
 }

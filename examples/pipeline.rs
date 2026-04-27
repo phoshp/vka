@@ -16,7 +16,7 @@ pub fn main() -> vka::Result<()> {
     let mut color_image = rd.image_create(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
             .samples(4)
-            .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
     )?;
 
     let rpass = rd.render_pass_create(&RenderPassDesc {
@@ -189,11 +189,11 @@ pub fn main() -> vka::Result<()> {
             }
             winit::event::WindowEvent::Resized(s) => {
                 log::info!("Resized to {}x{}", s.width, s.height);
-                rd.reconfigure_surface(SurfaceConfig { width: s.width, height: s.height, vsync: false });
+                rd.configure_surface(SurfaceConfig { width: s.width, height: s.height, vsync: false });
                 color_image = rd.image_create(
                     &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, s.width, s.height)
                         .samples(4)
-                        .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
+                        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
                 ).unwrap();
                 window.request_redraw();
             }

@@ -90,7 +90,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: &Surface, config: SurfaceCo
                 .image_color_space(color_space)
                 .image_extent(extent)
                 .image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -113,7 +113,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: &Surface, config: SurfaceCo
                     format,
                     extent.as_extent3d(1),
                     vk::SampleCountFlags::TYPE_1,
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
                     None,
                 );
                 img.set_name(format!("Swapchain Image {}", j));

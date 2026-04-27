@@ -1,6 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::ops::DerefMut;
 
 use ash::vk;
 use itertools::Itertools;
@@ -28,6 +28,12 @@ impl Deref for DescriptorSetLayout {
     }
 }
 
+impl DerefMut for DescriptorSetLayout {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 pub struct DescriptorSetLayoutImpl {
     pub handle: vk::DescriptorSetLayout,
     pub bindings: HashMap<u32, DescriptorSetLayoutEntry>,
@@ -41,6 +47,12 @@ impl Deref for DescriptorSet {
     type Target = Handle<DescriptorSetImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for DescriptorSet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 

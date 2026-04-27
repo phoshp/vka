@@ -4,8 +4,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
-use std::rc::Rc;
-use std::rc::Weak;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -14,6 +15,7 @@ use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::Allocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
 use gpu_allocator::vulkan::AllocationScheme;
+use parking_lot::Mutex;
 
 use crate::Handle;
 use crate::ImageDesc;
@@ -54,10 +56,9 @@ pub struct ImageImpl {
     pub aspect: vk::ImageAspectFlags,
     pub samples: vk::SampleCountFlags,
 
-    full_view: OnceCell<ImageView>,
-    pub(crate) views: RefCell<HashMap<u64, ImageView>>,
-
-    pub layout: Cell<vk::ImageLayout>,
+    pub(crate) full_view: OnceLock<ImageView>,
+    pub(crate) layout: Mutex<vk::ImageLayout>,
+    pub(crate) views: Mutex<HashMap<u64, ImageView>>,
 }
 
 impl ImageImpl {
@@ -66,10 +67,6 @@ impl ImageImpl {
             .aspect_mask(self.aspect)
             .level_count(vk::REMAINING_MIP_LEVELS)
             .layer_count(vk::REMAINING_ARRAY_LAYERS)
-    }
-
-    pub fn assume_layout(&self, layout: vk::ImageLayout) {
-        self.layout.set(layout);
     }
 }
 
@@ -124,9 +121,8 @@ impl RenderingDevice {
     }
 
     /// Creates an image and allocate memory for it from a `vk::ImageCreateInfo` and `MemoryLocation`.
-    pub fn image_from_info(&self, mut info: vk::ImageCreateInfo, location: MemoryLocation) -> Result<Image> {
+    pub fn image_from_info(&self, info: vk::ImageCreateInfo, location: MemoryLocation) -> Result<Image> {
         unsafe {
-            info.usage |= vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
             let image = self.device.create_image(&info, None)?;
             let mem_reqs = self.device.get_image_memory_requirements(image);
             let alloc = self
@@ -165,13 +161,13 @@ impl RenderingDevice {
                 usage,
                 aspect,
                 samples,
-                full_view: OnceCell::new(),
-                views: RefCell::new(HashMap::new()),
-                layout: Cell::new(vk::ImageLayout::UNDEFINED),
+                full_view: OnceLock::new(),
+                layout: Mutex::new(vk::ImageLayout::UNDEFINED),
+                views: Mutex::new(HashMap::new()),
             },
             alloc,
             |res, rd| unsafe {
-                for view in res.views.borrow().values() {
+                for view in res.views.lock().values() {
                     rd.device.destroy_image_view(view.handle, None);
                 }
                 if !res.alloc.is_null() {
@@ -222,16 +218,17 @@ impl RenderingDevice {
 
     pub fn image_view_create(&self, image: &Image, info: &vk::ImageViewCreateInfo) -> ImageView {
         let hash = utils::hash_struct(info);
-        if let Some(view) = image.views.borrow().get(&hash) {
+        let mut views = image.views.lock();
+        if let Some(view) = views.get(&hash) {
             return view.clone();
         }
         let raw = unsafe { self.device.create_image_view(info, None).unwrap() };
         let view = ImageView {
             handle: raw,
             id: VIEW_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
-            image: Rc::downgrade(image),
+            image: Arc::downgrade(image),
         };
-        image.views.borrow_mut().insert(hash, view.clone());
+        views.insert(hash, view.clone());
         view
     }
 

@@ -3,20 +3,22 @@
 use std::borrow::Cow;
 use std::cell::{Cell, Ref, RefMut};
 use std::ops::DerefMut;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{cell::RefCell, ffi::CStr, mem::ManuallyDrop, ops::Deref, rc::Rc, sync::LazyLock};
 
 use ash::ext::debug_utils;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use itertools::Itertools;
-use std::sync::Mutex as StdMutex;
+use parking_lot::lock_api::RawReentrantMutex;
+use parking_lot::{Mutex, MutexGuard, ReentrantMutex};
+use std::sync::{Arc, Mutex as StdMutex};
 
 mod belt;
 mod buffer;
 mod desc;
 mod descriptor;
 mod image;
-mod mutex;
 mod pass;
 mod pipeline;
 mod resource;
@@ -28,7 +30,6 @@ pub use buffer::*;
 pub use desc::*;
 pub use descriptor::*;
 pub use image::*;
-pub use mutex::*;
 pub use pass::*;
 pub use pipeline::*;
 pub use resource::*;
@@ -76,12 +77,13 @@ impl Default for QueueFamilies {
 /// Represents resources required for rendering a single frame in flight.
 pub struct Frame {
     pub cmd_pool: vk::CommandPool,
-    front_cmd: Cell<vk::CommandBuffer>,
-    back_cmd: Cell<vk::CommandBuffer>,
-    idle: Cell<bool>,
+    front_cmd: vk::CommandBuffer,
+    back_cmd: vk::CommandBuffer,
+    recording: ReentrantMutex<()>,
+    idle: bool,
 
-    pub fence: Cell<vk::Fence>,
-    pub belt: RefCell<StagingBelt>,
+    pub fence: vk::Fence,
+    pub belt: StagingBelt,
 }
 
 pub struct Presentation {
@@ -118,31 +120,31 @@ pub struct RenderingDeviceImpl {
     pub allocator: ManuallyDrop<StdMutex<Allocator>>,
 
     debug_utils: Option<DebugUtils>,
-    presentation: RefCell<Option<Presentation>>,
+    presentation: Mutex<Option<Presentation>>,
 
     pub queue_families: QueueFamilies,
     pub graphics_queue: vk::Queue,
     pub present_queue: vk::Queue,
 
-    pub frames: Vec<Frame>,
-    pub frame_index: Cell<usize>,
-}
-
-impl Into<RenderingDevice> for Rc<RenderingDeviceImpl> {
-    fn into(self) -> RenderingDevice {
-        RenderingDevice(self)
-    }
+    pub frames: Vec<Mutex<Frame>>,
+    pub frame_index: AtomicUsize,
 }
 
 /// A reference-counted wrapper around `RenderingDeviceImpl`, providing convenient access to Vulkan operations.
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct RenderingDevice(Rc<RenderingDeviceImpl>);
+pub struct RenderingDevice(Arc<RenderingDeviceImpl>);
 
 impl Deref for RenderingDevice {
-    type Target = RenderingDeviceImpl;
+    type Target = Arc<RenderingDeviceImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for RenderingDevice {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -342,16 +344,18 @@ impl RenderingDevice {
                     let fence = device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap();
                     Frame {
                         cmd_pool,
-                        front_cmd: Cell::new(cmds[0]),
-                        back_cmd: Cell::new(cmds[1]),
-                        idle: Cell::new(false),
-                        fence: Cell::new(fence),
-                        belt: RefCell::new(StagingBelt::new(4 * 1024 * 1024)), // 4 MB per chunk
+                        front_cmd: cmds[0],
+                        back_cmd: cmds[1],
+                        recording: ReentrantMutex::new(()),
+                        idle: false,
+                        fence,
+                        belt: StagingBelt::new(4 * 1024 * 1024), // 4 MB per chunk
                     }
                 })
+                .map(Mutex::new)
                 .collect_vec();
 
-            let rd = RenderingDevice(Rc::new(RenderingDeviceImpl {
+            let rd = RenderingDevice(Arc::new(RenderingDeviceImpl {
                 instance,
                 device,
                 phy_device,
@@ -369,14 +373,14 @@ impl RenderingDevice {
                 allocator: ManuallyDrop::new(allocator),
 
                 debug_utils,
-                presentation: RefCell::new(None),
+                presentation: Mutex::new(None),
 
                 queue_families,
                 graphics_queue,
                 present_queue,
 
                 frames,
-                frame_index: Cell::new(0),
+                frame_index: AtomicUsize::new(0),
             }));
 
             rd.wait_device()?;
@@ -405,15 +409,15 @@ impl RenderingDevice {
                     suboptimal: false,
                 }
             });
-            rd.presentation.replace(presentation);
+            *rd.presentation.lock() = presentation;
 
             Result::Ok(rd)
         }
     }
 
     /// Updates the swapchain surface configuration and recreates the swapchain.
-    pub fn reconfigure_surface(&self, config: SurfaceConfig) {
-        if let Some(p) = self.presentation.borrow_mut().as_mut() {
+    pub fn configure_surface(&self, config: SurfaceConfig) {
+        if let Some(p) = self.presentation.lock().as_mut() {
             p.surface_config = config;
         }
         self.recreate_swapchain();
@@ -421,7 +425,7 @@ impl RenderingDevice {
 
     pub fn recreate_swapchain(&self) {
         unsafe {
-            if let Some(p) = self.presentation.borrow_mut().as_mut() {
+            if let Some(p) = self.presentation.lock().as_mut() {
                 self.wait_device();
 
                 p.suboptimal = false;
@@ -442,32 +446,37 @@ impl RenderingDevice {
                     .map(|_| self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap())
                     .collect_vec();
                 for frame in self.frames.iter() {
-                    self.device.destroy_fence(frame.fence.get(), None);
-                    frame.fence.set(self.device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap());
+                    let mut f = frame.lock();
+                    self.device.destroy_fence(f.fence, None);
+                    f.fence = self.device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap();
                 }
             }
         }
     }
 
-    /// Gets the resources for the current frame.
-    pub fn frame(&self) -> &Frame {
-        &self.frames[self.frame_index.get()]
+    pub fn frame_index(&self) -> usize {
+        self.frame_index.load(Ordering::Acquire)
     }
 
-    pub fn frame_wait_idle(&self, frame: &Frame) -> Result<()> {
-        if !frame.idle.get() {
+    /// Gets the resources for the current frame.
+    pub fn frame(&self) -> MutexGuard<'_, Frame> {
+        self.frames[self.frame_index()].lock()
+    }
+
+    pub fn frame_wait_idle(&self, frame: &mut Frame) -> Result<()> {
+        if !frame.idle {
             unsafe {
-                self.device.wait_for_fences(&[frame.fence.get()], true, u64::MAX)?;
-                self.device.reset_fences(&[frame.fence.get()])?;
+                self.device.wait_for_fences(&[frame.fence], true, u64::MAX)?;
+                self.device.reset_fences(&[frame.fence])?;
             }
-            frame.idle.set(true);
+            frame.idle = true;
         }
         Ok(())
     }
 
     /// Acquires the next available image from the swapchain for rendering. Recreates swapchain if necessary.
     pub fn acquire_swapchain_image(&self) -> Option<Image> {
-        let mut borrow = self.presentation.borrow_mut();
+        let mut borrow = self.presentation.lock();
         let p = match borrow.as_mut() {
             Some(p) => p,
             None => return None,
@@ -478,13 +487,13 @@ impl RenderingDevice {
             self.recreate_swapchain();
             return None;
         }
-        let frame = self.frame();
-        self.frame_wait_idle(frame);
+        let mut frame = self.frame();
+        self.frame_wait_idle(&mut frame);
 
         let (image_index, suboptimal) = match unsafe {
             p.swapchain
                 .device
-                .acquire_next_image(p.swapchain.handle, u64::MAX, p.acquire_semaphores[self.frame_index.get()], vk::Fence::null())
+                .acquire_next_image(p.swapchain.handle, u64::MAX, p.acquire_semaphores[self.frame_index()], vk::Fence::null())
         } {
             Ok((index, suboptimal)) => (index, suboptimal),
             Err(e) => {
@@ -503,44 +512,43 @@ impl RenderingDevice {
         self.debug_utils.as_ref()
     }
 
-    pub fn presentation(&self) -> Ref<'_, Option<Presentation>> {
-        self.presentation.borrow()
+    pub fn presentation(&self) -> MutexGuard<'_, Option<Presentation>> {
+        self.presentation.lock()
     }
 
-    pub fn is_image_acquired(&self) -> bool {
-        self.presentation.borrow().as_ref().map(|p| p.image_acquired).unwrap_or(false)
+    pub fn get_cmd_buffer(&self) -> vk::CommandBuffer {
+        self.frame().front_cmd
     }
 
     pub fn get_swapchain_extent(&self) -> vk::Extent2D {
-        self.presentation.borrow().as_ref().map(|p| p.swapchain.extent).unwrap_or_default()
-    }
-
-    /// Gets the current frame's command buffer where rendering commands should be recorded.
-    pub fn get_cmd_buffer(&self) -> vk::CommandBuffer {
-        self.frame().front_cmd.get()
+        self.presentation.lock().as_ref().map(|p| p.swapchain.extent).unwrap_or_default()
     }
 
     /// Records commands to the current frame's command buffer via a closure.
     pub fn record(&self, record_fn: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
-        let cmd = self.get_cmd_buffer();
+        let frame = self.frame();
+        let cmd = frame.front_cmd;
+        frame.recording.lock();
+        drop(frame);
         record_fn(&self.device, cmd);
     }
 
     /// Submits the current frame's command buffer to the graphics queue and advances to the next frame.
     pub fn submit(&self) -> Result<()> {
         unsafe {
-            let frame = self.frame();
+            let frame_index = self.frame_index.load(Ordering::Acquire);
+            let mut frame = self.frames[frame_index].lock();
 
-            self.frame_wait_idle(frame);
-            frame.belt.borrow_mut().reset();
+            self.frame_wait_idle(&mut frame);
+            frame.belt.reset();
 
-            self.device.end_command_buffer(frame.front_cmd.get()).unwrap();
+            self.device.end_command_buffer(frame.front_cmd)?;
 
-            let pborrow = self.presentation.borrow();
+            let pborrow = self.presentation.lock();
             let p = pborrow.as_ref();
-            let cmd_buffers = [frame.front_cmd.get()];
-            let wait_semaphores = self.is_image_acquired().then(|| p.map(|p| p.acquire_semaphores[self.frame_index.get()]).unwrap());
-            let signal_semaphores = self.is_image_acquired().then(|| p.map(|p| p.present_semaphores[p.image_index]).unwrap());
+            let cmd_buffers = [frame.front_cmd];
+            let wait_semaphores = p.filter(|x| x.image_acquired).map(|x| x.acquire_semaphores[frame_index]);
+            let signal_semaphores = p.filter(|x| x.image_acquired).map(|x| x.present_semaphores[x.image_index]);
 
             let mut submit_info = vk::SubmitInfo::default()
                 .command_buffers(&cmd_buffers)
@@ -548,17 +556,20 @@ impl RenderingDevice {
                 .wait_semaphores(wait_semaphores.as_slice())
                 .signal_semaphores(signal_semaphores.as_slice());
 
-            self.device.queue_submit(self.graphics_queue, &[submit_info], frame.fence.get())?;
+            self.device.queue_submit(self.graphics_queue, &[submit_info], frame.fence)?;
+            self.device.reset_command_buffer(frame.back_cmd, vk::CommandBufferResetFlags::empty())?;
 
-            self.device.reset_command_buffer(frame.back_cmd.get(), vk::CommandBufferResetFlags::empty())?;
-            frame.front_cmd.swap(&frame.back_cmd);
-            frame.idle.set(false);
+            let t = frame.front_cmd;
+            frame.front_cmd = frame.back_cmd;
+            frame.back_cmd = t;
+            frame.idle = false;
+
             self.device.begin_command_buffer(
-                frame.front_cmd.get(),
+                frame.front_cmd,
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 
-            self.frame_index.set((self.frame_index.get() + 1) % self.frames.len());
+            self.frame_index.store((frame_index + 1) % self.frames.len(), Ordering::Release);
             Result::Ok(())
         }
     }
@@ -581,7 +592,7 @@ impl RenderingDevice {
 
     /// Presents the last rendered frame to the swapchain.
     pub fn present(&self) -> Result<()> {
-        if let Some(p) = self.presentation.borrow_mut().as_mut() {
+        if let Some(p) = self.presentation.lock().as_mut() {
             let image_index = p.image_index;
             let result = unsafe {
                 p.swapchain.device.queue_present(
@@ -613,7 +624,7 @@ impl RenderingDevice {
     }
 
     pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) -> Result<()> {
-        let (staging_buffer, ptr) = self.frame().belt.borrow_mut().download(self, data.len() as u64)?;
+        let (staging_buffer, ptr) = self.frame().belt.download(self, data.len() as u64)?;
         self.copy_buffer(
             buffer,
             &staging_buffer,
@@ -642,7 +653,7 @@ impl RenderingDevice {
         if size != data.len() as u64 {
             return Err(anyhow::anyhow!("Data buffer size does not match image region size"));
         }
-        let (staging_buffer, ptr) = self.frame().belt.borrow_mut().download(self, size)?;
+        let (staging_buffer, ptr) = self.frame().belt.download(self, size)?;
 
         self.record(|dev, cmd| unsafe {
             let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
@@ -669,7 +680,7 @@ impl RenderingDevice {
     }
 
     pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) -> Result<()> {
-        let (staging_buf, cursor, size) = self.frame().belt.borrow_mut().upload(self, bytes_of(data))?;
+        let (staging_buf, cursor, size) = self.frame().belt.upload(self, bytes_of(data))?;
         self.record(|dev, cmd| unsafe {
             dev.cmd_copy_buffer(
                 cmd,
@@ -691,7 +702,7 @@ impl RenderingDevice {
         subresource: vk::ImageSubresourceLayers,
         new_layout: Option<vk::ImageLayout>,
     ) -> Result<()> {
-        let (staging_buf, cursor, size) = self.frame().belt.borrow_mut().upload(self, bytes_of(data))?;
+        let (staging_buf, cursor, size) = self.frame().belt.upload(self, bytes_of(data))?;
         self.record(|dev, cmd| unsafe {
             let prev = self.barrier_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             dev.cmd_copy_buffer_to_image(
@@ -792,24 +803,24 @@ impl RenderingDevice {
 impl Drop for RenderingDeviceImpl {
     fn drop(&mut self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
+            self.device.device_wait_idle();
             log::info!("Destroying device");
             if let Some(debug_utils) = &self.debug_utils {
                 debug_utils.instance.destroy_debug_utils_messenger(debug_utils.messenger, None);
             }
 
-            for frame in self.frames.iter() {
-                self.device.destroy_fence(frame.fence.get(), None);
+            for mut frame in self.frames.iter().map(|f| f.lock()) {
+                self.device.destroy_fence(frame.fence, None);
                 self.device.destroy_command_pool(frame.cmd_pool, None);
 
-                for chunk in frame.belt.borrow_mut().active_chunks.iter_mut() {
-                    Rc::get_mut(&mut chunk.buffer).unwrap().destroy(self);
+                for chunk in frame.belt.active_chunks.iter_mut() {
+                    Arc::get_mut(&mut chunk.buffer).unwrap().destroy(self);
                 }
-                if let Some(mut readback) = frame.belt.borrow_mut().readback_buffer.take() {
-                    Rc::get_mut(&mut readback).unwrap().destroy(self);
+                if let Some(mut readback) = frame.belt.readback_buffer.take() {
+                    Arc::get_mut(&mut readback).unwrap().destroy(self);
                 }
             }
-            if let Some(p) = self.presentation.borrow_mut().as_mut() {
+            if let Some(p) = self.presentation.get_mut().as_mut() {
                 for &sem in p.acquire_semaphores.iter() {
                     self.device.destroy_semaphore(sem, None);
                 }
@@ -817,7 +828,7 @@ impl Drop for RenderingDeviceImpl {
                     self.device.destroy_semaphore(sem, None);
                 }
                 for image in p.swapchain.images.iter() {
-                    for view in image.views.borrow().values() {
+                    for view in image.views.lock().values() {
                         self.device.destroy_image_view(view.handle, None);
                     }
                 }
