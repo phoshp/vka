@@ -16,7 +16,7 @@ pub fn main() -> vka::Result<()> {
     let mut color_image = rd.image_create(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
             .samples(4)
-            .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
     )?;
 
     let rpass = rd.render_pass_create(&RenderPassDesc {
@@ -193,7 +193,7 @@ pub fn main() -> vka::Result<()> {
                 color_image = rd.image_create(
                     &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, s.width, s.height)
                         .samples(4)
-                        .usage(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT),
+                        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
                 ).unwrap();
                 window.request_redraw();
             }
