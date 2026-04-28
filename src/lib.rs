@@ -16,7 +16,6 @@ mod buffer;
 mod desc;
 mod descriptor;
 mod image;
-mod mutex;
 mod pass;
 mod pipeline;
 mod resource;
@@ -28,7 +27,6 @@ pub use buffer::*;
 pub use desc::*;
 pub use descriptor::*;
 pub use image::*;
-pub use mutex::*;
 pub use pass::*;
 pub use pipeline::*;
 pub use resource::*;
@@ -76,11 +74,11 @@ impl Default for QueueFamilies {
 /// Represents resources required for rendering a single frame in flight.
 pub struct Frame {
     pub cmd_pool: vk::CommandPool,
-    front_cmd: Cell<vk::CommandBuffer>,
-    back_cmd: Cell<vk::CommandBuffer>,
-    idle: Cell<bool>,
+    pub active_cmd: Cell<vk::CommandBuffer>,
+    pub used_cmd: Cell<vk::CommandBuffer>,
 
     pub fence: Cell<vk::Fence>,
+    pub fence_signalled: Cell<bool>,
     pub belt: RefCell<StagingBelt>,
 }
 
@@ -126,12 +124,6 @@ pub struct RenderingDeviceImpl {
 
     pub frames: Vec<Frame>,
     pub frame_index: Cell<usize>,
-}
-
-impl Into<RenderingDevice> for Rc<RenderingDeviceImpl> {
-    fn into(self) -> RenderingDevice {
-        RenderingDevice(self)
-    }
 }
 
 /// A reference-counted wrapper around `RenderingDeviceImpl`, providing convenient access to Vulkan operations.
@@ -342,10 +334,10 @@ impl RenderingDevice {
                     let fence = device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).unwrap();
                     Frame {
                         cmd_pool,
-                        front_cmd: Cell::new(cmds[0]),
-                        back_cmd: Cell::new(cmds[1]),
-                        idle: Cell::new(false),
+                        active_cmd: Cell::new(cmds[0]),
+                        used_cmd: Cell::new(cmds[1]),
                         fence: Cell::new(fence),
+                        fence_signalled: Cell::new(true),
                         belt: RefCell::new(StagingBelt::new(4 * 1024 * 1024)), // 4 MB per chunk
                     }
                 })
@@ -412,7 +404,7 @@ impl RenderingDevice {
     }
 
     /// Updates the swapchain surface configuration and recreates the swapchain.
-    pub fn reconfigure_surface(&self, config: SurfaceConfig) {
+    pub fn configure_surface(&self, config: SurfaceConfig) {
         if let Some(p) = self.presentation.borrow_mut().as_mut() {
             p.surface_config = config;
         }
@@ -455,14 +447,14 @@ impl RenderingDevice {
     }
 
     pub fn frame_wait_idle(&self, frame: &Frame) -> Result<()> {
-        if !frame.idle.get() {
-            unsafe {
-                self.device.wait_for_fences(&[frame.fence.get()], true, u64::MAX)?;
-                self.device.reset_fences(&[frame.fence.get()])?;
-            }
-            frame.idle.set(true);
+        if frame.fence_signalled.get() {
+            return Ok(());
         }
-        Ok(())
+        unsafe {
+            self.device.wait_for_fences(&[frame.fence.get()], true, u64::MAX)?;
+            frame.fence_signalled.set(true);
+            Ok(())
+        }
     }
 
     /// Acquires the next available image from the swapchain for rendering. Recreates swapchain if necessary.
@@ -517,7 +509,7 @@ impl RenderingDevice {
 
     /// Gets the current frame's command buffer where rendering commands should be recorded.
     pub fn get_cmd_buffer(&self) -> vk::CommandBuffer {
-        self.frame().front_cmd.get()
+        self.frame().active_cmd.get()
     }
 
     /// Records commands to the current frame's command buffer via a closure.
@@ -532,13 +524,15 @@ impl RenderingDevice {
             let frame = self.frame();
 
             self.frame_wait_idle(frame);
-            frame.belt.borrow_mut().reset();
+            self.device.reset_fences(&[frame.fence.get()])?;
+            frame.fence_signalled.set(false);
 
-            self.device.end_command_buffer(frame.front_cmd.get()).unwrap();
+            frame.belt.borrow_mut().reset();
+            self.device.end_command_buffer(frame.active_cmd.get()).unwrap();
 
             let pborrow = self.presentation.borrow();
             let p = pborrow.as_ref();
-            let cmd_buffers = [frame.front_cmd.get()];
+            let cmd_buffers = [frame.active_cmd.get()];
             let wait_semaphores = self.is_image_acquired().then(|| p.map(|p| p.acquire_semaphores[self.frame_index.get()]).unwrap());
             let signal_semaphores = self.is_image_acquired().then(|| p.map(|p| p.present_semaphores[p.image_index]).unwrap());
 
@@ -550,11 +544,10 @@ impl RenderingDevice {
 
             self.device.queue_submit(self.graphics_queue, &[submit_info], frame.fence.get())?;
 
-            self.device.reset_command_buffer(frame.back_cmd.get(), vk::CommandBufferResetFlags::empty())?;
-            frame.front_cmd.swap(&frame.back_cmd);
-            frame.idle.set(false);
+            self.device.reset_command_buffer(frame.used_cmd.get(), vk::CommandBufferResetFlags::empty())?;
+            frame.active_cmd.swap(&frame.used_cmd);
             self.device.begin_command_buffer(
-                frame.front_cmd.get(),
+                frame.active_cmd.get(),
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 

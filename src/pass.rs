@@ -28,8 +28,7 @@ pub struct RenderPassImpl {
     images: RefCell<Vec<Image>>,
 
     pub clear_values: Vec<vk::ClearValue>,
-    pub initial_layouts: Vec<vk::ImageLayout>,
-    pub final_layouts: Vec<vk::ImageLayout>
+    pub layouts: Vec<vk::ImageLayout>,
 }
 
 impl Deref for RenderPass {
@@ -54,7 +53,6 @@ pub struct Attachment {
     pub format: vk::Format,
     pub samples: u32,
     pub layout: vk::ImageLayout,
-    pub final_layout: Option<vk::ImageLayout>,
     pub ops: Operations,
 }
 
@@ -85,17 +83,6 @@ pub struct RenderPassDesc<'a> {
     pub subpasses: &'a [Subpass<'a>],
 }
 
-fn conv_usage_to_layout(usage: vk::ImageUsageFlags) -> vk::ImageLayout {
-    if usage.contains(vk::ImageUsageFlags::STORAGE) {
-        vk::ImageLayout::GENERAL
-    } else if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-    } else if usage.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT) {
-        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    } else {
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-    }
-}
 fn conv_load_op<V>(op: &LoadOp<V>) -> vk::AttachmentLoadOp {
     match op {
         LoadOp::Load => vk::AttachmentLoadOp::LOAD,
@@ -133,7 +120,7 @@ impl RenderingDevice {
                     .stencil_load_op(ops.2)
                     .stencil_store_op(ops.3)
                     .initial_layout(a.layout)
-                    .final_layout(a.final_layout.unwrap_or(a.layout))
+                    .final_layout(a.layout)
             })
             .collect::<Vec<_>>();
 
@@ -240,16 +227,14 @@ impl RenderingDevice {
                 .unwrap()
         };
 
-        let initial_layouts = attachments.iter().map(|a| a.initial_layout).collect_vec();
-        let final_layouts = attachments.iter().map(|a| a.final_layout).collect_vec();
+        let layouts = attachments.iter().map(|a| a.initial_layout).collect_vec();
         let rpass = RenderPassImpl {
             handle: raw,
             framebuffers: Default::default(),
 
             images: RefCell::new(Vec::with_capacity(attachments.len())),
             clear_values,
-            initial_layouts,
-            final_layouts,
+            layouts,
         };
 
         RenderPass(Resource::new(self, rpass, None, |res, rd| unsafe {
@@ -267,7 +252,7 @@ impl RenderingDevice {
             images.extend(views.iter().map(|i| i.get_image().expect("attachment image must be valid")));
 
             for (i, t) in images.iter().enumerate() {
-                let init_layout = rpass.initial_layouts[i];
+                let init_layout = rpass.layouts[i];
                 if t.layout.get() != init_layout && init_layout != vk::ImageLayout::UNDEFINED {
                     self.barrier_image(cmd, t, init_layout);
                 }
@@ -311,7 +296,7 @@ impl RenderingDevice {
     pub fn next_subpass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass) {
         for (i, t) in rpass.images.borrow().iter().enumerate() {
             // we assumed image layouts of attachments remain same during whole pass, so guarantee this inside next subpass
-            let required_layout = rpass.initial_layouts[i];
+            let required_layout = rpass.layouts[i];
             if t.layout.get() != required_layout {
                 self.barrier_image(cmd, t, required_layout);
             }
@@ -324,9 +309,6 @@ impl RenderingDevice {
     pub fn end_render_pass(&self, cmd: vk::CommandBuffer, rpass: &RenderPass) {
         unsafe {
             self.device.cmd_end_render_pass(cmd);
-        }
-        for (i, t) in rpass.images.borrow().iter().enumerate() {
-            t.assume_layout(rpass.final_layouts[i]);
         }
     }
 }

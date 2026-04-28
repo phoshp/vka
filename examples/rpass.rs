@@ -25,7 +25,6 @@ pub fn main() -> vka::Result<()> {
             format: vk::Format::B8G8R8A8_UNORM,
             samples: 1,
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            final_layout: Some(vk::ImageLayout::PRESENT_SRC_KHR),
             ops: vka::Operations::Color {
                 load: vka::LoadOp::Clear(vec4(1.0, 1.0, 0.0, 1.0)),
                 store: vka::StoreOp::Store,
@@ -57,6 +56,7 @@ pub fn main() -> vka::Result<()> {
                         },
                     );
                     rd.end_render_pass(cmd, &rpass);
+                    rd.barrier_image(cmd, &frame, vk::ImageLayout::PRESENT_SRC_KHR);
                 });
                 rd.submit();
                 rd.present();

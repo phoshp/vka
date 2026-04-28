@@ -55,10 +55,6 @@ impl<T> Resource<T> {
         })
     }
 
-    pub fn internal(rd: &RenderingDevice, value: T) -> Handle<T> {
-        Self::new(rd, value, None, |_, _| {})
-    }
-
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -95,10 +91,10 @@ impl<T> Resource<T> {
             rd.device.queue_wait_idle(rd.graphics_queue).unwrap();
         }
 
-        let alloc = std::mem::take(&mut self.alloc);
         if let Some(mut dtor) = self.dtor.take() {
             dtor(self, &rd);
         }
+        let alloc = std::mem::take(&mut self.alloc);
         if !alloc.is_null() {
             rd.allocator.lock().unwrap().free(alloc);
         }
@@ -141,12 +137,12 @@ impl RenderingDevice {
         if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
             new_layout = old_layout; // so, just skip layout transition, only a memory barrier.
         }
-        self.barrier_image_from(cmd, image.handle, image.aspect, old_layout, new_layout);
+        self.barrier_image_raw(cmd, image.handle, image.aspect, old_layout, new_layout);
         image.layout.set(new_layout);
         old_layout
     }
 
-    pub fn barrier_image_from(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
+    pub fn barrier_image_raw(&self, cmd: vk::CommandBuffer, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
         unsafe {
             if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
                 new_layout = old_layout;

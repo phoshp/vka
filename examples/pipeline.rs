@@ -12,7 +12,7 @@ pub fn main() -> vka::Result<()> {
     env_logger::init();
     let event_loop = winit::event_loop::EventLoop::new()?;
     let window = event_loop.create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))?;
-    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window))?;
+    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window).with_gpu_validation())?;
     let mut color_image = rd.image_create(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
             .samples(4)
@@ -25,7 +25,6 @@ pub fn main() -> vka::Result<()> {
                 format: color_image.format,
                 samples: color_image.samples.as_raw(),
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                final_layout: None,
                 ops: Operations::Color {
                     load: LoadOp::Clear(vec4(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Discard,
@@ -35,7 +34,6 @@ pub fn main() -> vka::Result<()> {
                 format: vk::Format::B8G8R8A8_UNORM,
                 samples: 1,
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                final_layout: Some(vk::ImageLayout::PRESENT_SRC_KHR),
                 ops: Operations::Color {
                     load: LoadOp::Discard,
                     store: StoreOp::Store,
@@ -172,6 +170,7 @@ pub fn main() -> vka::Result<()> {
                     dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buf.handle], &[0]);
                     dev.cmd_draw(cmd, 3, 1, 0, 0);
                     rd.end_render_pass(cmd, &rpass);
+                    rd.barrier_image(cmd, &frame, vk::ImageLayout::PRESENT_SRC_KHR);
                 });
                 rd.submit();
                 rd.present();
@@ -189,7 +188,7 @@ pub fn main() -> vka::Result<()> {
             }
             winit::event::WindowEvent::Resized(s) => {
                 log::info!("Resized to {}x{}", s.width, s.height);
-                rd.reconfigure_surface(SurfaceConfig { width: s.width, height: s.height, vsync: false });
+                rd.configure_surface(SurfaceConfig { width: s.width, height: s.height, vsync: false });
                 color_image = rd.image_create(
                     &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, s.width, s.height)
                         .samples(4)
