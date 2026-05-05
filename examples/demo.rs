@@ -1,39 +1,27 @@
-#![allow(unused)]
-
 use ash::vk;
 use vka;
 use vka::RenderingDeviceDesc;
 
-pub fn main() -> vka::Result<()> {
+pub fn main() {
     env_logger::init();
-    let rd = vka::RenderingDevice::new(&RenderingDeviceDesc::default().with_gpu_validation())?;
+    let rd = vka::RenderingDevice::new(&RenderingDeviceDesc::default().with_gpu_validation()).unwrap();
 
-    let buffer = rd.buffer_create(&vka::BufferDesc::uniform(4 * 1024))?;
-    buffer.set_name("demo uniform buffer");
-    let image = rd.image_create(&vka::ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 256, 256))?;
-    let img_view = rd.image_full_view(&image);
-    let sampler = rd.sampler_nearest(vk::SamplerAddressMode::REPEAT);
+    let buffer = rd.new_buffer(&vka::BufferDesc::uniform(4 * 1024));
+    let image = rd.new_image(&vka::ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 256, 256));
 
-    rd.acquire_swapchain_image();
-    rd.record(|dev, cmd| unsafe {
-        rd.barrier_image(cmd, &image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-        dev.cmd_clear_color_image(
-            cmd,
-            image.handle,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &vk::ClearColorValue { float32: [1.0, 0.0, 0.0, 1.0] },
-            &[image.full_range()],
-        );
-        rd.barrier_image(cmd, &image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-    });
-    rd.submit()?;
-    rd.present()?;
+    let mut cmd = rd.new_command_buffer();
+    cmd.clear_color_image(
+        &image,
+        vk::ClearColorValue { float32: [1.0, 0.0, 0.0, 1.0] },
+        &[image.full_range()],
+    );
+    rd.submit([cmd.finish()], None);
 
     rd.write_buffer(&buffer, &[1u8, 1u8, 1u8, 0u8, 0, 0], 0);
-    rd.submit_wait()?;
+    rd.wait_queue();
 
     let mut read_data = [0; 6];
     rd.read_buffer(&buffer, &mut read_data, 0); // this is implicitly immediate.
     assert_eq!(read_data, [1, 1, 1, 0, 0, 0]);
-    Ok(())
+    println!("Demo succeeded!");
 }

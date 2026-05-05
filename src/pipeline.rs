@@ -1,68 +1,71 @@
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use ash::vk;
 use itertools::Itertools;
 
-use crate::Handle;
 use crate::RenderPass;
 use crate::RenderingDevice;
-use crate::Resource;
+use crate::ShaderModule;
+use crate::SharedDevice;
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct PipelineLayout(Handle<PipelineLayoutImpl>);
+pub struct PipelineLayout(Arc<PipelineLayoutImpl>);
 
 impl Deref for PipelineLayout {
-    type Target = Handle<PipelineLayoutImpl>;
+    type Target = Arc<PipelineLayoutImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 pub struct PipelineLayoutImpl {
-    pub handle: vk::PipelineLayout,
+    pub raw: vk::PipelineLayout,
+    pub id: u64,
     pub set_layouts: Vec<super::DescriptorSetLayout>,
+    device: Arc<SharedDevice>,
+}
+
+impl Drop for PipelineLayoutImpl {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.raw.destroy_pipeline_layout(self.raw, None);
+        }
+    }
 }
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct GraphicsPipeline(Handle<GraphicsPipelineImpl>);
+pub struct Pipeline(Arc<PipelineImpl>);
 
-impl Deref for GraphicsPipeline {
-    type Target = Handle<GraphicsPipelineImpl>;
+impl Deref for Pipeline {
+    type Target = Arc<PipelineImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-pub struct GraphicsPipelineImpl {
-    pub handle: vk::Pipeline,
+pub struct PipelineImpl {
+    pub raw: vk::Pipeline,
+    pub id: u64,
     pub layout: PipelineLayout,
-    pub pass: Option<vk::RenderPass>,
-    pub subpass: u32,
+    device: Arc<SharedDevice>,
 }
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct ComputePipeline(Handle<ComputePipelineImpl>);
-
-impl Deref for ComputePipeline {
-    type Target = Handle<ComputePipelineImpl>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Drop for PipelineImpl {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.raw.destroy_pipeline(self.raw, None);
+        }
     }
 }
 
-pub struct ComputePipelineImpl {
-    pub handle: vk::Pipeline,
-    pub layout: PipelineLayout,
-}
-
-pub struct ShaderStage {
+pub struct ShaderStage<'a> {
     pub stage: vk::ShaderStageFlags,
-    pub module: vk::ShaderModule,
-    pub name: CString,
+    pub module: &'a ShaderModule,
+    pub name: &'a CStr,
 }
 
 pub struct VertexAttribute {
@@ -211,9 +214,9 @@ pub const COLOR_BLEND_PREMULTIPLIED: vk::PipelineColorBlendAttachmentState = mak
     vk::BlendOp::ADD,
 );
 
-pub struct GraphicsPipelineDesc<'a> {
+pub struct RenderPipelineDesc<'a> {
     pub layout: &'a PipelineLayout,
-    pub stages: &'a [ShaderStage],
+    pub stages: &'a [ShaderStage<'a>],
     pub vertex_input: &'a [VertexInputLayout<'a>],
     pub input_assembly: InputAssemblyState,
     pub rasterization: RasterizationState,
@@ -226,7 +229,7 @@ pub struct GraphicsPipelineDesc<'a> {
 
 pub struct ComputePipelineDesc<'a> {
     pub layout: &'a PipelineLayout,
-    pub stage: ShaderStage,
+    pub stage: ShaderStage<'a>,
 }
 
 impl Default for InputAssemblyState {
@@ -280,37 +283,28 @@ impl Default for ColorBlendState<'_> {
 }
 
 impl RenderingDevice {
-    pub fn shader_module_create(&self, spv: &[u8]) -> super::Result<Handle<vk::ShaderModule>> {
-        let code = ash::util::read_spv(&mut std::io::Cursor::new(spv))?;
-        let info = vk::ShaderModuleCreateInfo::default().code(&code);
-        let module = unsafe { self.device.create_shader_module(&info, None)? };
-        Ok(Resource::new(self, module, None, |res, rd| {
-            unsafe { rd.device.destroy_shader_module(res.value, None) };
-        }))
-    }
-
-    pub fn pipeline_layout_create(&self, set_layouts: &[super::DescriptorSetLayout]) -> super::Result<PipelineLayout> {
-        let set_layouts_vk = set_layouts.iter().map(|l| l.handle).collect_vec();
+    pub fn new_pipeline_layout(&self, set_layouts: &[super::DescriptorSetLayout]) -> PipelineLayout {
+        let set_layouts_vk = set_layouts.iter().map(|l| l.raw).collect_vec();
         let push_constant_ranges = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::ALL).offset(0).size(128)];
 
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts_vk)
             .push_constant_ranges(&push_constant_ranges);
-        let raw = unsafe { self.device.create_pipeline_layout(&pipeline_layout_info, None)? };
+        let raw = unsafe { self.raw.create_pipeline_layout(&pipeline_layout_info, None).expect("Failed to create pipeline layout") };
         let inner = PipelineLayoutImpl {
-            handle: raw,
+            raw,
+            id: crate::next_resource_id(),
             set_layouts: Vec::from(set_layouts),
+            device: self.shared.clone(),
         };
-        Ok(PipelineLayout(Resource::new(self, inner, None, |res, rd| {
-            unsafe { rd.device.destroy_pipeline_layout(res.handle, None) };
-        })))
+        PipelineLayout(Arc::new(inner))
     }
 
-    pub fn graphics_pipeline_create(&self, desc: &GraphicsPipelineDesc) -> super::Result<GraphicsPipeline> {
+    pub fn new_render_pipeline(&self, desc: &RenderPipelineDesc) -> Pipeline {
         let stages = desc
             .stages
             .iter()
-            .map(|s| vk::PipelineShaderStageCreateInfo::default().stage(s.stage).module(s.module).name(&s.name))
+            .map(|s| vk::PipelineShaderStageCreateInfo::default().stage(s.stage).module(s.module.raw).name(&s.name))
             .collect::<Vec<_>>();
 
         let mut vertex_input_bindings = Vec::new();
@@ -386,7 +380,7 @@ impl RenderingDevice {
             .attachments(&desc.color_blend.attachments)
             .blend_constants(desc.color_blend.blend_constants);
 
-        let pass = desc.render_pass.as_ref().map(|p| p.handle);
+        let pass = desc.render_pass.as_ref().map(|p| p.raw);
         let subpass = desc.subpass;
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
@@ -400,8 +394,8 @@ impl RenderingDevice {
             vk::DynamicState::STENCIL_REFERENCE,
         ];
 
-        let result = unsafe {
-            self.device.create_graphics_pipelines(
+        let raw = unsafe {
+            self.raw.create_graphics_pipelines(
                 vk::PipelineCache::null(),
                 &[vk::GraphicsPipelineCreateInfo::default()
                     .stages(&stages)
@@ -413,53 +407,43 @@ impl RenderingDevice {
                     .depth_stencil_state(&depth_stencil_state)
                     .color_blend_state(&color_blend_state)
                     .dynamic_state(&vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states))
-                    .layout(desc.layout.handle)
+                    .layout(desc.layout.raw)
                     .render_pass(pass.unwrap_or(vk::RenderPass::null()))
                     .subpass(subpass)],
                 None,
-            )
-        };
-        let raw = match result {
-            Ok(pipelines) => pipelines.into_iter().next().unwrap(),
-            Err((_, err)) => return Err(err.into()),
-        };
+            ).expect("Failed to create graphics pipeline")
+        }[0];
 
-        let pipeline = GraphicsPipelineImpl {
-            handle: raw,
+        let inner = PipelineImpl {
+            raw,
+            id: crate::next_resource_id(),
             layout: desc.layout.clone(),
-            pass,
-            subpass,
+            device: self.shared.clone(),
         };
 
-        Ok(GraphicsPipeline(Resource::new(self, pipeline, None, |res, rd| unsafe {
-            rd.device.destroy_pipeline(res.handle, None);
-        })))
+        Pipeline(Arc::new(inner))
     }
 
-    pub fn compute_pipeline_create(&self, desc: &ComputePipelineDesc) -> super::Result<ComputePipeline> {
+    pub fn new_compute_pipeline(&self, desc: &ComputePipelineDesc) -> Pipeline {
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(desc.stage.stage)
-            .module(desc.stage.module)
+            .module(desc.stage.module.raw)
             .name(&desc.stage.name);
 
-        let result = unsafe {
-            self.device.create_compute_pipelines(
+        let raw = unsafe {
+            self.raw.create_compute_pipelines(
                 vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(desc.layout.handle).base_pipeline_index(-1)],
+                &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(desc.layout.raw)],
                 None,
-            )
-        };
-        let raw = match result {
-            Ok(pipelines) => pipelines.into_iter().next().unwrap(),
-            Err((_, err)) => return Err(err.into()),
-        };
+            ).expect("Failed to create compute pipeline")
+        }[0];
 
-        let pipeline = ComputePipelineImpl {
-            handle: raw,
+        let inner = PipelineImpl {
+            raw,
+            id: crate::next_resource_id(),
             layout: desc.layout.clone(),
+            device: self.shared.clone(),
         };
-        Ok(ComputePipeline(Resource::new(self, pipeline, None, |res, rd| unsafe {
-            rd.device.destroy_pipeline(res.handle, None);
-        })))
+        Pipeline(Arc::new(inner))
     }
 }

@@ -778,12 +778,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glam"
-version = "0.32.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
-
-[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2313,14 +2307,11 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vka"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
- "anyhow",
  "ash",
  "ash-window",
- "bitflags 2.11.0",
  "env_logger",
- "glam",
  "gpu-allocator",
  "image",
  "itertools",

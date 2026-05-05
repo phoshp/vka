@@ -1,44 +1,44 @@
 #![allow(unused, deprecated)]
 
 use std::ffi::CString;
+use std::io::Cursor;
 use std::time::Duration;
 use std::time::Instant;
 
 use ash::vk;
-use glam::vec4;
 use vka::*;
 
-pub fn main() -> vka::Result<()> {
+pub fn main() {
     env_logger::init();
-    let event_loop = winit::event_loop::EventLoop::new()?;
-    let window = event_loop.create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))?;
-    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window).with_gpu_validation())?;
-    let mut color_image = rd.image_create(
+    let event_loop = winit::event_loop::EventLoop::new().unwrap();
+    let window = event_loop
+        .create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))
+        .unwrap();
+    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window).with_gpu_validation()).unwrap();
+    let mut color_image = rd.new_image(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
             .samples(4)
             .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
-    )?;
+    );
 
-    let rpass = rd.render_pass_create(&RenderPassDesc {
+    let rpass = rd.new_render_pass(&RenderPassDesc {
         attachments: &[
-            Attachment { 
+            Attachment {
                 format: color_image.format,
                 samples: color_image.samples.as_raw(),
-                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 ops: Operations::Color {
-                    load: LoadOp::Clear(vec4(0.0, 1.0, 1.0, 1.0)),
+                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Discard,
-                }
+                },
             },
             Attachment {
                 format: vk::Format::B8G8R8A8_UNORM,
                 samples: 1,
-                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 ops: Operations::Color {
                     load: LoadOp::Discard,
                     store: StoreOp::Store,
                 },
-            }
+            },
         ],
         subpasses: &[Subpass {
             colors: &[(0, Some(1))],
@@ -47,13 +47,13 @@ pub fn main() -> vka::Result<()> {
         }],
     });
 
-    let layout = rd.pipeline_layout_create(&[])?;
+    let layout = rd.new_pipeline_layout(&[]);
 
     let vert_spv = include_bytes!("../shaders/triangle.vert.spv");
     let frag_spv = include_bytes!("../shaders/triangle.frag.spv");
 
-    let vert_module = rd.shader_module_create(vert_spv)?;
-    let frag_module = rd.shader_module_create(frag_spv)?;
+    let vert_module = rd.new_shader(&ash::util::read_spv(&mut Cursor::new(vert_spv)).unwrap());
+    let frag_module = rd.new_shader(&ash::util::read_spv(&mut Cursor::new(frag_spv)).unwrap());
 
     #[repr(C)]
     struct Vertex {
@@ -74,9 +74,9 @@ pub fn main() -> vka::Result<()> {
             color: [0.0, 0.0, 1.0, 1.0],
         },
     ];
-    let vertex_buf = rd.buffer_create(&BufferDesc::vertex((std::mem::size_of::<Vertex>() * 3) as u64))?;
+    let vertex_buf = rd.new_buffer(&BufferDesc::vertex((std::mem::size_of::<Vertex>() * 3) as u64));
     rd.write_buffer(&vertex_buf, &vertices, 0);
-    rd.submit_wait()?;
+    rd.wait_queue();
 
     let attributes = vertex_attributes! {
         0 => vk::Format::R32G32B32A32_SFLOAT,
@@ -92,18 +92,18 @@ pub fn main() -> vka::Result<()> {
 
     let main_name = CString::new("main").unwrap();
 
-    let pipeline = rd.graphics_pipeline_create(&GraphicsPipelineDesc {
+    let pipeline = rd.new_render_pipeline(&vka::RenderPipelineDesc {
         layout: &layout,
         stages: &[
             ShaderStage {
                 stage: vk::ShaderStageFlags::VERTEX,
-                module: vert_module.value,
-                name: main_name.clone(),
+                module: &vert_module,
+                name: &main_name,
             },
             ShaderStage {
                 stage: vk::ShaderStageFlags::FRAGMENT,
-                module: frag_module.value,
-                name: main_name,
+                module: &frag_module,
+                name: &main_name,
             },
         ],
         vertex_input,
@@ -123,57 +123,54 @@ pub fn main() -> vka::Result<()> {
         },
         render_pass: Some(&rpass),
         subpass: 0,
-    })?;
+    });
 
     let mut fps_timer = Instant::now();
     let mut frame_count = 0;
     let mut fps = 0.0;
 
+    let mut surface = rd.new_surface(&window, vka::SurfaceConfig::default());
+
     event_loop.run(|event, event_loop| match event {
         winit::event::Event::WindowEvent { event, .. } => match event {
             winit::event::WindowEvent::RedrawRequested => {
-                let frame = rd.acquire_swapchain_image().unwrap();
-                rd.record(|dev, cmd| unsafe {
-                    let extent = rd.get_swapchain_extent();
+                let frame = surface.acquire();
+                let mut cmd = rd.new_command_buffer();
+                let extent = surface.swapchain.extent;
 
-                    rd.begin_render_pass(
-                        cmd,
-                        &rpass,
-                        &[rd.image_full_view(&color_image), rd.image_full_view(&frame)],
-                        vk::Rect2D {
-                            offset: vk::Offset2D::default(),
-                            extent,
-                        },
-                    );
-                    dev.cmd_set_viewport(
-                        cmd,
-                        0,
-                        &[vk::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            width: extent.width as f32,
-                            height: extent.height as f32,
-                            min_depth: 0.0,
-                            max_depth: 1.0,
-                        }],
-                    );
-                    dev.cmd_set_scissor(
-                        cmd,
-                        0,
-                        &[vk::Rect2D {
-                            offset: vk::Offset2D::default(),
-                            extent,
-                        }],
-                    );
+                cmd.begin_render_pass(
+                    &rpass,
+                    &[color_image.full_view(), frame.image.full_view()],
+                    vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    },
+                );
+                cmd.set_viewport(
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: extent.width as f32,
+                        height: extent.height as f32,
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                cmd.set_scissor(
+                    0,
+                    &[vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent,
+                    }],
+                );
+                cmd.bind_pipeline(&pipeline);
+                cmd.bind_vertex_buffers(0, &[vertex_buf.raw], &[0]);
+                cmd.draw(3, 1, 0, 0);
+                cmd.end_render_pass();
 
-                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
-                    dev.cmd_bind_vertex_buffers(cmd, 0, &[vertex_buf.handle], &[0]);
-                    dev.cmd_draw(cmd, 3, 1, 0, 0);
-                    rd.end_render_pass(cmd, &rpass);
-                    rd.barrier_image(cmd, &frame, vk::ImageLayout::PRESENT_SRC_KHR);
-                });
-                rd.submit();
-                rd.present();
+                rd.submit([cmd.finish()], Some(&frame));
+                surface.present(&frame);
 
                 frame_count += 1;
                 let elapsed = fps_timer.elapsed();
@@ -188,12 +185,17 @@ pub fn main() -> vka::Result<()> {
             }
             winit::event::WindowEvent::Resized(s) => {
                 log::info!("Resized to {}x{}", s.width, s.height);
-                rd.configure_surface(SurfaceConfig { width: s.width, height: s.height, vsync: false });
-                color_image = rd.image_create(
+                surface.configure(vka::SurfaceConfig {
+                    width: s.width,
+                    height: s.height,
+                    vsync: false,
+                    frame_latency: 2,
+                });
+                color_image = rd.new_image(
                     &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, s.width, s.height)
                         .samples(4)
                         .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
-                ).unwrap();
+                );
                 window.request_redraw();
             }
             winit::event::WindowEvent::CloseRequested => {
@@ -204,27 +206,28 @@ pub fn main() -> vka::Result<()> {
         _ => (),
     });
 
-    rd.wait_queue()?;
+    rd.wait_queue();
 
-    let image = rd.acquire_swapchain_image().unwrap();
-    let mut data = vec![0u8; 800 * 400 * 4 * image.samples.as_raw() as usize];
-    rd.read_image(
-        &image,
-        &mut data,
-        vk::Offset3D { x: 64, y: 64, z: 0 },
-        vk::Extent3D { width: 800, height: 400, depth: 1 },
-        4,
-        vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-    )?;
-    let mut native_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(800, 400, data.as_mut()).unwrap();
-    native_img.save("examples/frame.png")?;
-    println!("Saved frame.png");
-
-    Ok(())
+    // let image = rd.acquire_swapchain_image().unwrap();
+    // let mut data = vec![0u8; 800 * 400 * 4 * image.samples.as_raw() as usize];
+    // rd.read_image(
+    //     &image,
+    //     &mut data,
+    //     vk::Offset3D { x: 64, y: 64, z: 0 },
+    //     vk::Extent3D {
+    //         width: 800,
+    //         height: 400,
+    //         depth: 1,
+    //     },
+    //     4,
+    //     vk::ImageSubresourceLayers {
+    //         aspect_mask: vk::ImageAspectFlags::COLOR,
+    //         mip_level: 0,
+    //         base_array_layer: 0,
+    //         layer_count: 1,
+    //     },
+    // )?;
+    // let mut native_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(800, 400, data.as_mut()).unwrap();
+    // native_img.save("examples/frame.png")?;
+    // println!("Saved frame.png");
 }
-

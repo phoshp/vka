@@ -1,66 +1,72 @@
-use std::cell::Cell;
-use std::cell::OnceCell;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::ops::DerefMut;
-use std::rc::Rc;
-use std::rc::Weak;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::Allocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
 use gpu_allocator::vulkan::AllocationScheme;
+use parking_lot::Mutex;
 
-use crate::Handle;
 use crate::ImageDesc;
 use crate::RenderingDevice;
-use crate::Resource;
-use crate::Result;
-use crate::WeakHandle;
-use crate::bytes_of;
-use crate::utils;
+use crate::SharedDevice;
+use crate::hash_struct;
+use crate::next_resource_id;
 
 /// A wrapper around a Vulkan image resource, providing additional metadata and caching for image views.
 ///
-/// The `Image` struct holds the Vulkan image handle, its format, extent, usage, aspect mask, sample count, and layout.
+/// The `Image` struct holds the Vulkan image handle, its format, extent, usage, aspect mask, sample count.
 /// It also caches the image views to avoid redundant Vulkan calls.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[repr(transparent)]
-pub struct Image(Handle<ImageImpl>);
+pub struct Image(Arc<ImageImpl>);
 
 impl Deref for Image {
-    type Target = Handle<ImageImpl>;
+    type Target = Arc<ImageImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-impl DerefMut for Image {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
-/// The internal implementation of the `Image` resource, containing the Vulkan image handle and related metadata.
-#[derive(Debug)]
 pub struct ImageImpl {
-    pub handle: vk::Image,
+    pub raw: vk::Image,
+    pub id: u64,
+    pub alloc: Allocation,
+    device: Arc<SharedDevice>,
+
     pub format: vk::Format,
     pub extent: vk::Extent3D,
     pub usage: vk::ImageUsageFlags,
     pub aspect: vk::ImageAspectFlags,
     pub samples: vk::SampleCountFlags,
 
-    full_view: OnceCell<ImageView>,
-    pub(crate) views: RefCell<HashMap<u64, ImageView>>,
-
-    pub layout: Cell<vk::ImageLayout>,
+    pub initialized: AtomicBool,
+    full_view: OnceLock<ImageView>,
+    pub(crate) views: Mutex<HashMap<u64, ImageView>>,
 }
 
-impl ImageImpl {
+impl Drop for ImageImpl {
+    fn drop(&mut self) {
+        unsafe {
+            let dev = &self.device.raw;
+            for view in self.views.lock().values() {
+                dev.destroy_image_view(view.raw, None);
+            }
+            let alloc = std::mem::take(&mut self.alloc);
+            if !alloc.is_null() {
+                dev.destroy_image(self.raw, None);
+                self.device.allocator.lock().unwrap().free(alloc).unwrap();
+            }
+        }
+    }
+}
+
+impl Image {
     pub fn full_range(&self) -> vk::ImageSubresourceRange {
         vk::ImageSubresourceRange::default()
             .aspect_mask(self.aspect)
@@ -68,31 +74,70 @@ impl ImageImpl {
             .layer_count(vk::REMAINING_ARRAY_LAYERS)
     }
 
-    pub fn assume_layout(&self, layout: vk::ImageLayout) {
-        self.layout.set(layout);
+    /// Gets or creates a view encompassing the entire image (all mips and layers).
+    pub fn full_view(&self) -> &ImageView {
+        self.full_view.get_or_init(move || self.view_range(self.full_range()))
+    }
+
+    /// Gets or creates a view for a specific mip level and array layer.
+    #[inline]
+    pub fn view(&self, aspect: vk::ImageAspectFlags, mip_level: u32, layer: u32) -> ImageView {
+        self.view_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(aspect)
+                .base_mip_level(mip_level)
+                .level_count(1)
+                .base_array_layer(layer)
+                .layer_count(1),
+        )
+    }
+
+    /// Gets or creates a view covering a custom `vk::ImageSubresourceRange`.
+    pub fn view_range(&self, range: vk::ImageSubresourceRange) -> ImageView {
+        self.view_raw(
+            &vk::ImageViewCreateInfo::default()
+                .image(self.raw)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(self.format)
+                .subresource_range(range),
+        )
+    }
+
+    pub fn view_raw(&self, info: &vk::ImageViewCreateInfo) -> ImageView {
+        let hash = hash_struct(info);
+        let mut views = self.views.lock();
+        if let Some(view) = views.get(&hash) {
+            return view.clone();
+        }
+        let raw = unsafe { self.device.raw.create_image_view(info, None).unwrap() };
+        let view = ImageView {
+            raw,
+            id: next_resource_id(),
+            image: Arc::downgrade(&self.0),
+        };
+        views.insert(hash, view.clone());
+        view
     }
 }
 
-static VIEW_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ImageView {
-    pub handle: vk::ImageView,
+    pub raw: vk::ImageView,
     pub id: u64,
-    image: WeakHandle<ImageImpl>,
+    image: Weak<ImageImpl>,
 }
 
 impl ImageView {
-    pub fn get_image(&self) -> Option<Image> {
+    pub fn image(&self) -> Option<Image> {
         self.image.upgrade().map(Image)
     }
 
     pub fn descriptor(&self) -> vk::DescriptorImageInfo {
-        vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: self.handle, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL }
+        vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: self.raw, image_layout: vk::ImageLayout::GENERAL }
     }
 }
 
-pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
+fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
     match format {
         vk::Format::D16_UNORM | vk::Format::X8_D24_UNORM_PACK32 | vk::Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
         vk::Format::S8_UINT => vk::ImageAspectFlags::STENCIL,
@@ -101,10 +146,11 @@ pub fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
     }
 }
 
+
 impl RenderingDevice {
     /// Creates an image based on the provided description, allocating memory and binding it.
-    pub fn image_create(&self, desc: &ImageDesc) -> Result<Image> {
-        self.image_from_info(
+    pub fn new_image(&self, desc: &ImageDesc) -> Image {
+        self.new_image_info(
             vk::ImageCreateInfo::default()
                 .image_type(if desc.depth == 1 { vk::ImageType::TYPE_2D } else { vk::ImageType::TYPE_3D })
                 .format(desc.format)
@@ -124,12 +170,13 @@ impl RenderingDevice {
     }
 
     /// Creates an image and allocate memory for it from a `vk::ImageCreateInfo` and `MemoryLocation`.
-    pub fn image_from_info(&self, mut info: vk::ImageCreateInfo, location: MemoryLocation) -> Result<Image> {
+    pub fn new_image_info(&self, mut info: vk::ImageCreateInfo, location: MemoryLocation) -> Image {
         unsafe {
             info.usage |= vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
-            let image = self.device.create_image(&info, None)?;
-            let mem_reqs = self.device.get_image_memory_requirements(image);
+            let image = self.raw.create_image(&info, None).expect("Failed to create image");
+            let mem_reqs = self.raw.get_image_memory_requirements(image);
             let alloc = self
+                .shared
                 .allocator
                 .lock()
                 .unwrap()
@@ -141,12 +188,18 @@ impl RenderingDevice {
                     allocation_scheme: AllocationScheme::GpuAllocatorManaged,
                 })
                 .unwrap();
-            self.device.bind_image_memory(image, alloc.memory(), alloc.offset())?;
-            Result::Ok(self.image_from_raw(image, info.format, info.extent, info.samples, info.usage, Some(alloc)))
+            self.raw.bind_image_memory(image, alloc.memory(), alloc.offset()).expect("Failed to bind image memory");
+            let res = self.new_image_raw(image, info.format, info.extent, info.samples, info.usage, Some(alloc));
+            {
+                let mut cmd = self.new_command_buffer();
+                cmd.image_barrier_raw(res.raw, res.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
+                self.submit([cmd.finish()], None);
+            }
+            res
         }
     }
 
-    pub fn image_from_raw(
+    pub fn new_image_raw(
         &self,
         image: vk::Image,
         format: vk::Format,
@@ -156,172 +209,23 @@ impl RenderingDevice {
         alloc: Option<Allocation>,
     ) -> Image {
         let aspect = conv_format_to_aspect_mask(format);
-        Image(Resource::new(
-            self,
-            ImageImpl {
-                handle: image,
-                format,
-                extent,
-                usage,
-                aspect,
-                samples,
-                full_view: OnceCell::new(),
-                views: RefCell::new(HashMap::new()),
-                layout: Cell::new(vk::ImageLayout::UNDEFINED),
-            },
-            alloc,
-            |res, rd| unsafe {
-                for view in res.views.borrow().values() {
-                    rd.device.destroy_image_view(view.handle, None);
-                }
-                if !res.alloc.is_null() {
-                    rd.device.destroy_image(res.handle, None);
-                }
-            },
-        ))
-    }
+        let inner = ImageImpl {
+            raw: image,
+            id: next_resource_id(),
+            alloc: alloc.unwrap_or_default(),
+            device: self.shared.clone(),
 
-    /// Gets or creates a view encompassing the entire image (all mips and layers).
-    pub fn image_full_view<'a>(&self, image: &'a Image) -> &'a ImageView {
-        image.full_view.get_or_init(|| {
-            self.image_view_range(
-                image,
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(image.aspect)
-                    .level_count(vk::REMAINING_MIP_LEVELS)
-                    .layer_count(vk::REMAINING_ARRAY_LAYERS),
-            )
-        })
-    }
+            format,
+            extent,
+            usage,
+            aspect,
+            samples,
 
-    /// Gets or creates a view for a specific mip level and array layer.
-    #[inline]
-    pub fn image_view(&self, image: &Image, aspect: vk::ImageAspectFlags, mip_level: u32, layer: u32) -> ImageView {
-        self.image_view_range(
-            image,
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(aspect)
-                .base_mip_level(mip_level)
-                .level_count(1)
-                .base_array_layer(layer)
-                .layer_count(1),
-        )
-    }
-
-    /// Gets or creates a view covering a custom `vk::ImageSubresourceRange`.
-    pub fn image_view_range(&self, image: &Image, range: vk::ImageSubresourceRange) -> ImageView {
-        self.image_view_create(
-            image,
-            &vk::ImageViewCreateInfo::default()
-                .image(image.handle)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(image.format)
-                .subresource_range(range),
-        )
-    }
-
-    pub fn image_view_create(&self, image: &Image, info: &vk::ImageViewCreateInfo) -> ImageView {
-        let hash = utils::hash_struct(info);
-        if let Some(view) = image.views.borrow().get(&hash) {
-            return view.clone();
-        }
-        let raw = unsafe { self.device.create_image_view(info, None).unwrap() };
-        let view = ImageView {
-            handle: raw,
-            id: VIEW_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
-            image: Rc::downgrade(image),
+            initialized: AtomicBool::new(false),
+            full_view: OnceLock::new(),
+            views: Mutex::new(HashMap::new()),
         };
-        image.views.borrow_mut().insert(hash, view.clone());
-        view
+        Image(Arc::new(inner))
     }
 
-    /// Creates a generic Vulkan sampler.
-    pub fn sampler_create(&self, info: vk::SamplerCreateInfo) -> Handle<vk::Sampler> {
-        let value = unsafe { self.device.create_sampler(&info, None).unwrap() };
-        Resource::new(self, value, None, |res, rd| unsafe {
-            rd.device.destroy_sampler(res.value, None);
-        })
-    }
-
-    /// Creates a Sampler with nearest filtering for both min and mag.
-    pub fn sampler_nearest(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
-        self.sampler_create(
-            vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::NEAREST)
-                .min_filter(vk::Filter::NEAREST)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(wrap_mode)
-                .address_mode_v(wrap_mode)
-                .address_mode_w(wrap_mode),
-        )
-    }
-
-    /// Creates a Sampler with nearest mag and linear min filtering.
-    pub fn sampler_nearest_linear(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
-        self.sampler_create(
-            vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::NEAREST)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(wrap_mode)
-                .address_mode_v(wrap_mode)
-                .address_mode_w(wrap_mode),
-        )
-    }
-
-    /// Creates a Sampler with bilinear filtering (linear min/mag, nearest mipmap).
-    pub fn sampler_bilinear(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
-        self.sampler_create(
-            vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-                .address_mode_u(wrap_mode)
-                .address_mode_v(wrap_mode)
-                .address_mode_w(wrap_mode),
-        )
-    }
-
-    /// Creates a Sampler with trilinear filtering (linear min/mag/mipmap).
-    pub fn sampler_trilinear(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
-        self.sampler_create(
-            vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(wrap_mode)
-                .address_mode_v(wrap_mode)
-                .address_mode_w(wrap_mode),
-        )
-    }
-
-    /// Creates a Sampler with anisotropic filtering enabled.
-    pub fn sampler_anisotropic(&self, wrap_mode: vk::SamplerAddressMode, max_anisotropy: f32) -> Handle<vk::Sampler> {
-        self.sampler_create(
-            vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(wrap_mode)
-                .address_mode_v(wrap_mode)
-                .address_mode_w(wrap_mode)
-                .anisotropy_enable(true)
-                .max_anisotropy(max_anisotropy),
-        )
-    }
-
-    /// Creates a Sampler configured for shadow mapping (linear filtering, compare enable).
-    pub fn sampler_shadow(&self, wrap_mode: vk::SamplerAddressMode) -> Handle<vk::Sampler> {
-        self.sampler_create(
-            vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(wrap_mode)
-                .address_mode_v(wrap_mode)
-                .address_mode_w(wrap_mode)
-                .compare_enable(true)
-                .compare_op(vk::CompareOp::LESS_OR_EQUAL),
-        )
-    }
 }

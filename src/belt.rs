@@ -1,17 +1,11 @@
-use std::cell::RefCell;
 use std::ptr;
 
-use anyhow::Ok;
-use anyhow::anyhow;
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 
 use crate::Buffer;
 use crate::BufferDesc;
-use crate::Image;
 use crate::RenderingDevice;
-use crate::Result;
-use crate::utils;
 
 pub const COPY_ALIGNMENT: u64 = 4;
 
@@ -30,54 +24,53 @@ impl StagingBelt {
         }
     }
 
-    pub fn download(&mut self, rd: &RenderingDevice, size: u64) -> Result<(Buffer, *mut u8)> {
-        if size <= 0 {
-            return Err(anyhow!("Tried to read zero bytes from buffer"));
-        }
+    pub fn download(&mut self, rd: &RenderingDevice, size: u64) -> (Buffer, *mut u8) {
+        assert!(size > 0, "Tried to download zero bytes from buffer");
         if self.readback_buffer.as_ref().map_or(true, |b| b.size < size) {
-            let buf = rd.buffer_create(&BufferDesc::new(size).location(MemoryLocation::GpuToCpu))?;
-            buf.set_name("staging readback buffer");
+            let buf = rd.new_buffer(&BufferDesc::new(size).location(MemoryLocation::GpuToCpu));
             self.readback_buffer = Some(buf);
         }
         let staging_buffer = self.readback_buffer.as_ref().unwrap();
-        let ptr = staging_buffer.alloc().mapped_ptr().ok_or(anyhow!("Failed to map staging buffer"))?.as_ptr() as *mut u8;
-        Ok((staging_buffer.clone(), ptr))
+        let ptr = staging_buffer.alloc.mapped_ptr().unwrap().as_ptr() as *mut u8;
+        (staging_buffer.clone(), ptr)
     }
 
-    pub fn upload(&mut self, rd: &RenderingDevice, data: &[u8]) -> Result<(Buffer, u64, u64)> {
+    pub fn upload(&mut self, rd: &RenderingDevice, data: &[u8]) -> (Buffer, u64, u64) {
         let size = size_of_val(data) as u64;
-        if size <= 0 {
-            return Err(anyhow!("Tried to write zero bytes to staging buffer"));
-        }
-
+        assert!(size > 0, "Tried to upload zero bytes to buffer");
+        let submission = *rd.submit_mutex.lock();
         let index = if let Some(i) = self.active_chunks.iter().position(|c| c.can_allocate(size)) {
             i
         } else {
             assert!(size < self.chunk_size);
-            let buffer = rd
-                .buffer_create(
-                    &BufferDesc::new(self.chunk_size.max(size))
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .location(MemoryLocation::CpuToGpu),
-                )
-                .unwrap();
-            buffer.set_name(format!("staging chunk {}", self.active_chunks.len()));
-            self.active_chunks.push(StagingChunk { buffer, cursor: 0 });
+            let buffer = rd.new_buffer(
+                &BufferDesc::new(self.chunk_size.max(size))
+                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                    .location(MemoryLocation::CpuToGpu),
+            );
+            self.active_chunks.push(StagingChunk {
+                buffer,
+                cursor: 0,
+                last_used_submission: submission,
+            });
             self.active_chunks.len() - 1
         };
 
         let chunk = &mut self.active_chunks[index];
+        chunk.last_used_submission = submission;
         let offset = chunk.allocate(size);
-        let ptr = chunk.buffer.alloc().mapped_ptr().ok_or(vk::Result::ERROR_MEMORY_MAP_FAILED).unwrap().as_ptr() as *mut u8;
+        let ptr = chunk.buffer.alloc.mapped_ptr().unwrap().as_ptr() as *mut u8;
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), size as usize);
         }
-        Ok((chunk.buffer.clone(), offset, size))
+        (chunk.buffer.clone(), offset, size)
     }
 
-    pub fn reset(&mut self) {
+    pub fn maintain(&mut self, completed: u64) {
         self.active_chunks.iter_mut().for_each(|c| {
-            c.cursor = 0;
+            if c.last_used_submission <= completed {
+                c.cursor = 0;
+            }
         });
     }
 }
@@ -85,18 +78,19 @@ impl StagingBelt {
 pub struct StagingChunk {
     pub buffer: Buffer,
     pub cursor: u64,
+    pub last_used_submission: u64,
 }
 
 impl StagingChunk {
     pub fn can_allocate(&self, size: u64) -> bool {
-        let end = utils::align_up(self.cursor + size, COPY_ALIGNMENT);
+        let end = crate::align_up(self.cursor + size, COPY_ALIGNMENT);
         end <= self.buffer.size
     }
 
     pub fn allocate(&mut self, size: u64) -> u64 {
         assert!(self.can_allocate(size));
         let offset = self.cursor;
-        self.cursor = utils::align_up(self.cursor + size, COPY_ALIGNMENT);
+        self.cursor = crate::align_up(self.cursor + size, COPY_ALIGNMENT);
         offset
     }
 }

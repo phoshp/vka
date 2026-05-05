@@ -1,67 +1,77 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::ops::DerefMut;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::Allocation;
 use gpu_allocator::vulkan::AllocationCreateDesc;
 use gpu_allocator::vulkan::AllocationScheme;
+use parking_lot::Mutex;
 
 use crate::BufferDesc;
-use crate::Handle;
 use crate::RenderingDevice;
-use crate::Resource;
-use crate::Result;
-use crate::bytes_of;
-use crate::utils;
+use crate::SharedDevice;
+use crate::next_resource_id;
 
 /// A reference-counted wrapper around a Vulkan buffer resource.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[repr(transparent)]
-pub struct Buffer(Handle<BufferImpl>);
+pub struct Buffer(Arc<BufferImpl>);
+
+pub struct BufferImpl {
+    pub raw: vk::Buffer,
+    pub id: u64,
+    pub alloc: Allocation,
+    device: Arc<SharedDevice>,
+
+    pub size: vk::DeviceSize,
+    pub usage: vk::BufferUsageFlags,
+    views: Mutex<HashMap<u64, vk::BufferView>>,
+}
+
+impl Drop for BufferImpl {
+    fn drop(&mut self) {
+        unsafe {
+            let dev = &self.device.raw;
+            for view in self.views.lock().values() {
+                dev.destroy_buffer_view(*view, None);
+            }
+            let alloc = std::mem::take(&mut self.alloc);
+            if !alloc.is_null() {
+                dev.destroy_buffer(self.raw, None);
+                self.device.allocator.lock().unwrap().free(alloc).unwrap();
+            }
+        }
+    }
+}
 
 impl Buffer {
     pub fn descriptor(&self, offset: u64, range: u64) -> vk::DescriptorBufferInfo {
-        vk::DescriptorBufferInfo { buffer: self.handle, offset, range }
+        vk::DescriptorBufferInfo { buffer: self.raw, offset, range }
     }
 }
 
 impl Deref for Buffer {
-    type Target = Handle<BufferImpl>;
+    type Target = Arc<BufferImpl>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
-impl DerefMut for Buffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-/// Inner state of a Vulkan buffer, managing its handle, size, usage, and cached views.
-#[derive(Debug)]
-pub struct BufferImpl {
-    pub handle: vk::Buffer,
-    pub size: vk::DeviceSize,
-    pub usage: vk::BufferUsageFlags,
-    pub views: RefCell<HashMap<u64, vk::BufferView>>,
-}
 
 impl RenderingDevice {
     /// Creates a buffer based on the provided description, allocating memory and binding it.
-    pub fn buffer_create(&self, desc: &BufferDesc) -> Result<Buffer> {
-        self.buffer_from_info(vk::BufferCreateInfo::default().size(desc.size).usage(desc.usage).sharing_mode(vk::SharingMode::EXCLUSIVE), desc.location)
+    pub fn new_buffer(&self, desc: &BufferDesc) -> Buffer {
+        self.new_buffer_info(vk::BufferCreateInfo::default().size(desc.size).usage(desc.usage).sharing_mode(vk::SharingMode::EXCLUSIVE), desc.location)
     }
 
-    pub fn buffer_from_info(&self, mut info: vk::BufferCreateInfo, location: MemoryLocation) -> Result<Buffer> {
+    pub fn new_buffer_info(&self, mut info: vk::BufferCreateInfo, location: MemoryLocation) -> Buffer {
         unsafe {
             info.usage |= vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
-            let buffer = self.device.create_buffer(&info, None)?;
-            let mem_reqs = self.device.get_buffer_memory_requirements(buffer);
+            let buffer = self.raw.create_buffer(&info, None).expect("Failed to create buffer");
+            let mem_reqs = self.raw.get_buffer_memory_requirements(buffer);
             let alloc = self
+                .shared
                 .allocator
                 .lock()
                 .unwrap()
@@ -73,50 +83,45 @@ impl RenderingDevice {
                     allocation_scheme: AllocationScheme::GpuAllocatorManaged
                 })
                 .unwrap();
-            self.device.bind_buffer_memory(buffer, alloc.memory(), alloc.offset())?;
-            Result::Ok(self.buffer_from_raw(buffer, info.size, info.usage, Some(alloc)))
+            self.raw.bind_buffer_memory(buffer, alloc.memory(), alloc.offset()).expect("Failed to bind buffer memory");
+            self.new_buffer_raw(buffer, info.size, info.usage, Some(alloc))
         }
     }
 
-    pub fn buffer_from_raw(&self, buffer: vk::Buffer, size: u64, usage: vk::BufferUsageFlags, alloc: Option<Allocation>) -> Buffer {
-        Buffer(Resource::new(
-            self,
-            BufferImpl {
-                handle: buffer,
-                size,
-                usage,
-                views: RefCell::new(HashMap::new()),
-            },
-            alloc,
-            |res, rd| unsafe {
-                for view in res.views.borrow().values() {
-                    rd.device.destroy_buffer_view(*view, None);
-                }
-                rd.device.destroy_buffer(res.value.handle, None);
-            },
-        ))
+    pub fn new_buffer_raw(&self, buffer: vk::Buffer, size: u64, usage: vk::BufferUsageFlags, alloc: Option<Allocation>) -> Buffer {
+        let inner = BufferImpl {
+            id: next_resource_id(),
+            raw: buffer,
+            alloc: alloc.unwrap_or_default(),
+            device: self.shared.clone(),
+
+            size,
+            usage,
+            views: Mutex::new(HashMap::new()),
+        };
+        Buffer(Arc::new(inner))
     }
 
     /// Creates a buffer view for a specific region of the given buffer.
     /// Views are cached internally by the buffer to avoid redundant creations.
-    pub fn buffer_view(&self, buffer: &Buffer, format: vk::Format, offset: u64, range: u64) -> Result<vk::BufferView> {
-        self.buffer_view_with(
+    pub fn new_buffer_view(&self, buffer: &Buffer, format: vk::Format, offset: u64, range: u64) -> vk::BufferView {
+        self.new_buffer_view_with(
             buffer,
             &vk::BufferViewCreateInfo::default()
-                .buffer(buffer.handle)
+                .buffer(buffer.raw)
                 .format(format)
-                .offset(utils::align_up(offset, self.properties.limits.min_texel_buffer_offset_alignment))
+                .offset(crate::align_up(offset, self.properties.limits.min_texel_buffer_offset_alignment))
                 .range(range),
         )
     }
 
-    pub fn buffer_view_with(&self, buffer: &Buffer, info: &vk::BufferViewCreateInfo) -> Result<vk::BufferView> {
-        let hash = utils::hash_struct(info);
-        if let Some(view) = buffer.views.borrow().get(&hash) {
-            return Result::Ok(*view);
+    pub fn new_buffer_view_with(&self, buffer: &Buffer, info: &vk::BufferViewCreateInfo) -> vk::BufferView {
+        let hash = crate::hash_struct(info);
+        if let Some(view) = buffer.views.lock().get(&hash) {
+            return *view;
         }
-        let view = unsafe { self.device.create_buffer_view(info, None)? };
-        buffer.views.borrow_mut().insert(hash, view);
-        Result::Ok(view)
+        let view = unsafe { self.raw.create_buffer_view(info, None).expect("Failed to create buffer view") };
+        buffer.views.lock().insert(hash, view);
+        view
     }
 }
