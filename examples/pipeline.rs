@@ -26,8 +26,7 @@ pub fn main() {
             Attachment {
                 format: color_image.format,
                 samples: color_image.samples.as_raw(),
-                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                final_layout: None,
+                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 ops: Operations::Color {
                     load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Discard,
@@ -36,8 +35,7 @@ pub fn main() {
             Attachment {
                 format: vk::Format::B8G8R8A8_UNORM,
                 samples: 1,
-                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                final_layout: None,
+                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 ops: Operations::Color {
                     load: LoadOp::Discard,
                     store: StoreOp::Store,
@@ -172,7 +170,7 @@ pub fn main() {
                 cmd.bind_pipeline(&pipeline);
                 cmd.bind_vertex_buffers(0, &[vertex_buf.raw], &[0]);
                 cmd.draw(3, 1, 0, 0);
-                cmd.end_render_pass(&rpass, &views);
+                cmd.end_render_pass();
 
                 rd.submit([cmd], Some(&frame));
                 surface.present(&frame);

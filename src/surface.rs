@@ -1,6 +1,5 @@
 use std::slice;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use ash::prelude::VkResult;
 use ash::vk;
@@ -114,9 +113,7 @@ impl Surface {
                 };
 
                 {
-                    // Transition image to GENERAL for use.
                     let mut cmd = self.device.new_command_buffer();
-                    // let old_layout = if image.image.initialized.load(Ordering::Acquire) { vk::ImageLayout::PRESENT_SRC_KHR } else { vk::ImageLayout::UNDEFINED };
                     cmd.image_barrier_raw(image.image.raw, image.image.aspect, vk::ImageLayout::PRESENT_SRC_KHR, image.image.optimal_layout);
                     self.device.submit([cmd], Some(&image));
                 }
