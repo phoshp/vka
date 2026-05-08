@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::{ffi::CStr, mem::ManuallyDrop, ops::Deref};
 
 use ash::{ext::debug_utils, prelude::VkResult};
@@ -7,7 +8,7 @@ use itertools::Itertools;
 use parking_lot::Mutex;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::{Buffer, CommandBuffer, Image, RelaySemaphores, RenderingDeviceDesc, SurfaceImage, TimelineFence, belt::StagingBelt};
+use crate::{Buffer, CommandEncoder, Image, RelaySemaphores, RenderingDeviceDesc, SurfaceImage, TimelineFence, belt::StagingBelt};
 
 /// Holds indices for the different Vulkan queue families used by the device.
 #[derive(Debug, Clone, Copy)]
@@ -94,16 +95,22 @@ pub struct RenderingDeviceImpl {
     pub main_queue: vk::Queue,
     pub present_queue: vk::Queue,
 
-    cmd_buffers: Mutex<Vec<Box<CommandBuffer>>>,
-    pending_cmd_buffers: Mutex<Vec<(u64, Box<CommandBuffer>)>>,
+    free_encoders: Mutex<Vec<Box<CommandEncoder>>>,
+    pending_encoders: Mutex<Vec<Box<CommandEncoder>>>,
+    frames: Mutex<Vec<Frame>>,
+    frame_counter: Mutex<u64>,
+}
 
-    relay_semaphores: Mutex<RelaySemaphores>,
-    temp_submit_info: Mutex<TempSubmitInfo>,
-    pub(crate) fence: Mutex<TimelineFence>,
-    pub staging_belt: Mutex<StagingBelt>,
+pub struct EncoderInFlight {
+    pub encoder: Box<CommandEncoder>,
+    pub cmd_buffers: Vec<vk::CommandBuffer>,
+    pub submit_index: u64,
+}
 
-    pub submit_mutex: Mutex<u64>,
-    pub device_mutex: Mutex<()>,
+pub struct Frame {
+    pub wait_semaphore: Option<vk::Semaphore>,
+
+    pub encoders: Vec<Box<EncoderInFlight>>,
 }
 
 /// A reference-counted wrapper around `RenderingDeviceImpl`, providing convenient access to Vulkan operations.
@@ -349,18 +356,18 @@ impl RenderingDevice {
         }
     }
 
-    pub fn new_command_buffer(&self) -> Box<CommandBuffer> {
+    pub fn new_command_buffer(&self) -> Box<CommandEncoder> {
         let mut buffers = self.cmd_buffers.lock();
         let mut cmd = if let Some(cmd) = buffers.pop() {
             cmd
         } else {
-            Box::new(CommandBuffer::new(self, self.queue_families.graphics).unwrap())
+            Box::new(CommandEncoder::new(self, self.queue_families.graphics).unwrap())
         };
         cmd.begin();
         cmd
     }
 
-    pub fn release_command_buffer(&self, mut buffer: Box<CommandBuffer>) {
+    pub fn release_command_buffer(&self, mut buffer: Box<CommandEncoder>) {
         buffer.reset();
         self.cmd_buffers.lock().push(buffer);
     }
@@ -380,7 +387,7 @@ impl RenderingDevice {
         }
     }
 
-    pub fn submit<T: IntoIterator<Item = Box<CommandBuffer>>>(&self, cmd_buffers: T, image: Option<&SurfaceImage>) -> u64 {
+    pub fn submit<T: IntoIterator<Item = Box<CommandEncoder>>>(&self, cmd_buffers: T, image: Option<&SurfaceImage>) -> u64 {
         let mut temp = self.temp_submit_info.lock();
         temp.clear();
 

@@ -3,7 +3,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::Weak;
-use std::sync::atomic::AtomicBool;
 
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -146,6 +145,18 @@ fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
     }
 }
 
+pub fn find_optimal_layout(usage: vk::ImageUsageFlags) -> vk::ImageLayout {
+    if usage.contains(vk::ImageUsageFlags::STORAGE) {
+        vk::ImageLayout::GENERAL
+    } else if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+    } else if usage.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT) {
+        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    } else {
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+    }
+}
+
 
 impl RenderingDevice {
     /// Creates an image based on the provided description, allocating memory and binding it.
@@ -209,15 +220,7 @@ impl RenderingDevice {
         alloc: Option<Allocation>,
     ) -> Image {
         let aspect = conv_format_to_aspect_mask(format);
-        let optimal_layout = if usage.contains(vk::ImageUsageFlags::STORAGE) {
-            vk::ImageLayout::GENERAL
-        } else if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-        } else if usage.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT) {
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        } else {
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
-        };
+        let optimal_layout = find_optimal_layout(usage);
         let inner = ImageImpl {
             raw: image,
             id: next_resource_id(),

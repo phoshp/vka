@@ -20,8 +20,6 @@ pub struct RenderPassImpl {
     pub clear_values: Vec<vk::ClearValue>,
 
     device: Arc<SharedDevice>,
-    pub(crate) layouts: Vec<(vk::ImageLayout, bool)>,
-    pub(crate) final_layouts: Vec<vk::ImageLayout>,
     pub(crate) framebuffers: Mutex<HashMap<u64, vk::Framebuffer>>,
 }
 
@@ -58,8 +56,7 @@ pub enum StoreOp {
 pub struct Attachment {
     pub format: vk::Format,
     pub samples: u32,
-    pub layout: vk::ImageLayout,
-    pub final_layout: Option<vk::ImageLayout>,
+    pub usage: vk::ImageUsageFlags,
     pub ops: Operations,
 }
 
@@ -124,6 +121,7 @@ impl RenderingDevice {
                         stencil_store,
                     } => (conv_load_op(&load), conv_store_op(&store), conv_load_op(&stencil_load), conv_store_op(&stencil_store)),
                 };
+                let layout = crate::find_optimal_layout(a.usage);
                 vk::AttachmentDescription::default()
                     .format(a.format)
                     .samples(vk::SampleCountFlags::from_raw(a.samples))
@@ -131,8 +129,8 @@ impl RenderingDevice {
                     .store_op(ops.1)
                     .stencil_load_op(ops.2)
                     .stencil_store_op(ops.3)
-                    .initial_layout(a.layout)
-                    .final_layout(a.final_layout.unwrap_or(a.layout))
+                    .initial_layout(layout)
+                    .final_layout(layout)
             })
             .collect::<Vec<_>>();
 
@@ -219,29 +217,7 @@ impl RenderingDevice {
             );
             prev_subpass = i as u32;
         }
-        dependencies.push(
-            vk::SubpassDependency::default()
-                .src_subpass(prev_subpass)
-                .dst_subpass(vk::SUBPASS_EXTERNAL)
-                .src_stage_mask(vk::PipelineStageFlags::ALL_COMMANDS)
-                .dst_stage_mask(vk::PipelineStageFlags::ALL_COMMANDS)
-                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE),
-        );
 
-        let layouts = attachments
-            .iter()
-            .map(|a| {
-                let mut overwrite = false;
-                if (a.load_op == vk::AttachmentLoadOp::CLEAR || a.load_op == vk::AttachmentLoadOp::DONT_CARE)
-                    && (a.stencil_load_op == vk::AttachmentLoadOp::CLEAR || a.stencil_load_op == vk::AttachmentLoadOp::DONT_CARE)
-                {
-                    overwrite = true;
-                }
-                (a.initial_layout, overwrite)
-            })
-            .collect_vec();
-        let final_layouts = attachments.iter().map(|a| a.final_layout).collect_vec();
         let raw = unsafe {
             self.raw
                 .create_render_pass(
@@ -258,8 +234,6 @@ impl RenderingDevice {
             id: crate::next_resource_id(),
             clear_values,
             device: self.shared.clone(),
-            layouts,
-            final_layouts,
             framebuffers: Default::default(),
         };
         RenderPass(Arc::new(inner))

@@ -315,7 +315,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
             present_modes[0]
         };
 
-        let image_count = (config.frame_latency + 1).max(caps.min_image_count + 1);
+        let image_count = (config.frame_latency + 1).max(caps.min_image_count);
         let extent = vk::Extent2D {
             width: if caps.max_image_extent.width > 0 {
                 config.width.clamp(caps.min_image_extent.width, caps.max_image_extent.width)
@@ -329,9 +329,9 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
             },
         };
         log::info!("Creating swapchain:");
-        log::info!("Available present modes: {}", present_modes.iter().map(|&m| format!("{:?}", m)).join(","));
+        log::info!("Available present modes: {:?}", present_modes);
         log::info!("Selected present mode: {:?}", present_mode);
-        log::info!("Surface Format: {:?}", format);
+        log::info!("Surface Format: {:?} {:?}", format, color_space);
         log::info!("Framebuffer Size: {}x{}", extent.width, extent.height);
 
         let swapchain = device.create_swapchain(
@@ -345,7 +345,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
                 .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform)
-                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE) // TODO: Support other composite alpha modes
                 .present_mode(present_mode)
                 .clipped(true)
                 .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null())),
@@ -364,7 +364,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
                     format,
                     extent.as_extent3d(1),
                     vk::SampleCountFlags::TYPE_1,
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                    caps.supported_usage_flags,
                     None,
                 );
                 img

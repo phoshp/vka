@@ -14,10 +14,12 @@ pub fn main() {
     let window = event_loop
         .create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))
         .unwrap();
+    window.set_transparent(true);
+    window.set_blur(true);
     let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window)).unwrap();
     let mut color_image = rd.new_image(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
-            .samples(4)
+            .samples(1)
             .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
     );
 
@@ -29,7 +31,7 @@ pub fn main() {
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 final_layout: None,
                 ops: Operations::Color {
-                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
+                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 0.5)),
                     store: StoreOp::Discard,
                 },
             },
@@ -67,15 +69,15 @@ pub fn main() {
     let vertices = [
         Vertex {
             pos: [0.0, -0.5, 0.0, 1.0],
-            color: [1.0, 0.0, 0.0, 1.0],
+            color: [1.0, 0.0, 0.0, 0.5],
         },
         Vertex {
             pos: [0.5, 0.5, 0.0, 1.0],
-            color: [0.0, 1.0, 0.0, 1.0],
+            color: [0.0, 1.0, 0.0, 0.5],
         },
         Vertex {
             pos: [-0.5, 0.5, 0.0, 1.0],
-            color: [0.0, 0.0, 1.0, 1.0],
+            color: [0.0, 0.0, 1.0, 0.5],
         },
     ];
     let vertex_buf = rd.new_buffer(&BufferDesc::vertex((std::mem::size_of::<Vertex>() * 3) as u64));
@@ -198,7 +200,7 @@ pub fn main() {
                 });
                 color_image = rd.new_image(
                     &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, s.width, s.height)
-                        .samples(4)
+                        .samples(1)
                         .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT),
                 );
                 window.request_redraw();
