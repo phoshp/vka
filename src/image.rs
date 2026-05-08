@@ -44,8 +44,8 @@ pub struct ImageImpl {
     pub usage: vk::ImageUsageFlags,
     pub aspect: vk::ImageAspectFlags,
     pub samples: vk::SampleCountFlags,
+    pub optimal_layout: vk::ImageLayout,
 
-    pub initialized: AtomicBool,
     full_view: OnceLock<ImageView>,
     pub(crate) views: Mutex<HashMap<u64, ImageView>>,
 }
@@ -192,8 +192,8 @@ impl RenderingDevice {
             let res = self.new_image_raw(image, info.format, info.extent, info.samples, info.usage, Some(alloc));
             {
                 let mut cmd = self.new_command_buffer();
-                cmd.image_barrier_raw(res.raw, res.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
-                self.submit([cmd.finish()], None);
+                cmd.image_barrier_raw(res.raw, res.aspect, vk::ImageLayout::UNDEFINED, res.optimal_layout);
+                self.submit([cmd], None);
             }
             res
         }
@@ -209,6 +209,15 @@ impl RenderingDevice {
         alloc: Option<Allocation>,
     ) -> Image {
         let aspect = conv_format_to_aspect_mask(format);
+        let optimal_layout = if usage.contains(vk::ImageUsageFlags::STORAGE) {
+            vk::ImageLayout::GENERAL
+        } else if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        } else if usage.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT) {
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        } else {
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        };
         let inner = ImageImpl {
             raw: image,
             id: next_resource_id(),
@@ -220,8 +229,8 @@ impl RenderingDevice {
             usage,
             aspect,
             samples,
+            optimal_layout,
 
-            initialized: AtomicBool::new(false),
             full_view: OnceLock::new(),
             views: Mutex::new(HashMap::new()),
         };

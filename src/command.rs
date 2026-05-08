@@ -13,7 +13,6 @@ use crate::Pipeline;
 use crate::PipelineLayout;
 use crate::RenderPass;
 use crate::RenderingDevice;
-use crate::SurfaceImage;
 
 pub struct CommandBuffer {
     pub raw: vk::CommandBuffer,
@@ -63,7 +62,7 @@ impl CommandBuffer {
         })
     }
 
-    pub fn begin(&mut self) {
+    pub(crate) fn begin(&mut self) {
         unsafe {
             assert!(!self.pending, "Command buffer is still pending execution");
             self.device
@@ -73,13 +72,12 @@ impl CommandBuffer {
         }
     }
 
-    pub fn finish(mut self) -> Self {
+    pub(crate) fn finish(&mut self) {
         unsafe {
             self.device.end_command_buffer(self.raw).unwrap();
         }
         self.bind_point = BIND_POINT_NONE;
         self.pending = true;
-        self
     }
 
     pub(crate) fn reset(&mut self) {
@@ -153,6 +151,17 @@ impl CommandBuffer {
                 )
                 .unwrap()
         });
+
+        // for (i, view) in views.iter().enumerate() {
+        //     let image = view.image().expect("ImageView's image was dropped");
+        //     let init_layout = rpass.layouts[i];
+        //     self.image_barrier_raw(
+        //         image.raw,
+        //         image.aspect,
+        //         if init_layout.1 { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL },
+        //         init_layout.0,
+        //     );
+        // }
 
         self.bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
@@ -268,12 +277,22 @@ impl CommandBuffer {
         }
     }
 
-    pub fn end_render_pass(&mut self) {
+    pub fn end_render_pass(&mut self, rpass: &RenderPass, views: &[&ImageView]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         self.bind_point = BIND_POINT_NONE;
         unsafe {
             self.device.cmd_end_render_pass(self.raw);
         }
+        // for (i, view) in views.iter().enumerate() {
+        //     let image = view.image().expect("ImageView's image was dropped");
+        //     let layout = rpass.layouts[i];
+        //     self.image_barrier_raw(
+        //         image.raw,
+        //         image.aspect,
+        //         layout.0,
+        //         vk::ImageLayout::GENERAL
+        //     );
+        // }
     }
 
     pub fn end_rendering(&mut self) {
@@ -342,6 +361,15 @@ impl CommandBuffer {
             self.device
                 .cmd_pipeline_barrier(self.raw, src_stages, dst_stages, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
         }
+    }
+
+    pub fn image_barrier(&mut self, image: &Image, mut new_layout: vk::ImageLayout) {
+        // // let mut old_layout = image.layout.lock();
+        // if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
+        //     new_layout = *old_layout;
+        // }
+        // self.image_barrier_raw(image.raw, image.aspect, *old_layout, new_layout);
+        // *old_layout = new_layout;
     }
 
     pub fn image_barrier_raw(&mut self, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
@@ -443,32 +471,49 @@ impl CommandBuffer {
             self.device.cmd_copy_buffer(self.raw, src_buffer.raw, dst_buffer.raw, regions);
         }
     }
-    
+
     pub fn copy_image(&mut self, src_image: &Image, dst_image: &Image, regions: &[vk::ImageCopy]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_copy_image(self.raw, src_image.raw, vk::ImageLayout::GENERAL, dst_image.raw, vk::ImageLayout::GENERAL, regions);
+            self.device.cmd_copy_image(
+                self.raw,
+                src_image.raw,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                dst_image.raw,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                regions,
+            );
         }
     }
 
     pub fn copy_buffer_to_image(&mut self, src_buffer: &Buffer, dst_image: &Image, regions: &[vk::BufferImageCopy]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_copy_buffer_to_image(self.raw, src_buffer.raw, dst_image.raw, vk::ImageLayout::GENERAL, regions);
+            self.device
+                .cmd_copy_buffer_to_image(self.raw, src_buffer.raw, dst_image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, regions);
         }
     }
 
     pub fn copy_image_to_buffer(&mut self, src_image: &Image, dst_buffer: &Buffer, regions: &[vk::BufferImageCopy]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_copy_image_to_buffer(self.raw, src_image.raw, vk::ImageLayout::GENERAL, dst_buffer.raw, regions);
+            self.device
+                .cmd_copy_image_to_buffer(self.raw, src_image.raw, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, dst_buffer.raw, regions);
         }
     }
 
     pub fn blit_image(&mut self, src_image: &Image, dst_image: &Image, regions: &[vk::ImageBlit], filter: vk::Filter) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_blit_image(self.raw, src_image.raw, vk::ImageLayout::GENERAL, dst_image.raw, vk::ImageLayout::GENERAL, regions, filter);
+            self.device.cmd_blit_image(
+                self.raw,
+                src_image.raw,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                dst_image.raw,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                regions,
+                filter,
+            );
         }
     }
 
@@ -489,14 +534,16 @@ impl CommandBuffer {
     pub fn clear_color_image(&mut self, image: &Image, color: vk::ClearColorValue, ranges: &[vk::ImageSubresourceRange]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_clear_color_image(self.raw, image.raw, vk::ImageLayout::GENERAL, &color, ranges);
+            self.device
+                .cmd_clear_color_image(self.raw, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &color, ranges);
         }
     }
 
     pub fn clear_depth_stencil_image(&mut self, image: &Image, depth_stencil: vk::ClearDepthStencilValue, ranges: &[vk::ImageSubresourceRange]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_clear_depth_stencil_image(self.raw, image.raw, vk::ImageLayout::GENERAL, &depth_stencil, ranges);
+            self.device
+                .cmd_clear_depth_stencil_image(self.raw, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &depth_stencil, ranges);
         }
     }
 }

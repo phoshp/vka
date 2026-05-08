@@ -3,6 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use ash::vk;
+use itertools::Itertools;
 use parking_lot::Mutex;
 
 use crate::Color32;
@@ -19,6 +20,8 @@ pub struct RenderPassImpl {
     pub clear_values: Vec<vk::ClearValue>,
 
     device: Arc<SharedDevice>,
+    pub(crate) layouts: Vec<(vk::ImageLayout, bool)>,
+    pub(crate) final_layouts: Vec<vk::ImageLayout>,
     pub(crate) framebuffers: Mutex<HashMap<u64, vk::Framebuffer>>,
 }
 
@@ -55,6 +58,8 @@ pub enum StoreOp {
 pub struct Attachment {
     pub format: vk::Format,
     pub samples: u32,
+    pub layout: vk::ImageLayout,
+    pub final_layout: Option<vk::ImageLayout>,
     pub ops: Operations,
 }
 
@@ -126,8 +131,8 @@ impl RenderingDevice {
                     .store_op(ops.1)
                     .stencil_load_op(ops.2)
                     .stencil_store_op(ops.3)
-                    .initial_layout(vk::ImageLayout::GENERAL)
-                    .final_layout(vk::ImageLayout::GENERAL)
+                    .initial_layout(a.layout)
+                    .final_layout(a.final_layout.unwrap_or(a.layout))
             })
             .collect::<Vec<_>>();
 
@@ -224,6 +229,19 @@ impl RenderingDevice {
                 .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE),
         );
 
+        let layouts = attachments
+            .iter()
+            .map(|a| {
+                let mut overwrite = false;
+                if (a.load_op == vk::AttachmentLoadOp::CLEAR || a.load_op == vk::AttachmentLoadOp::DONT_CARE)
+                    && (a.stencil_load_op == vk::AttachmentLoadOp::CLEAR || a.stencil_load_op == vk::AttachmentLoadOp::DONT_CARE)
+                {
+                    overwrite = true;
+                }
+                (a.initial_layout, overwrite)
+            })
+            .collect_vec();
+        let final_layouts = attachments.iter().map(|a| a.final_layout).collect_vec();
         let raw = unsafe {
             self.raw
                 .create_render_pass(
@@ -240,9 +258,10 @@ impl RenderingDevice {
             id: crate::next_resource_id(),
             clear_values,
             device: self.shared.clone(),
+            layouts,
+            final_layouts,
             framebuffers: Default::default(),
         };
         RenderPass(Arc::new(inner))
     }
-
 }

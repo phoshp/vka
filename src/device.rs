@@ -94,8 +94,8 @@ pub struct RenderingDeviceImpl {
     pub main_queue: vk::Queue,
     pub present_queue: vk::Queue,
 
-    cmd_buffers: Mutex<Vec<CommandBuffer>>,
-    pending_cmd_buffers: Mutex<Vec<(u64, CommandBuffer)>>,
+    cmd_buffers: Mutex<Vec<Box<CommandBuffer>>>,
+    pending_cmd_buffers: Mutex<Vec<(u64, Box<CommandBuffer>)>>,
 
     relay_semaphores: Mutex<RelaySemaphores>,
     temp_submit_info: Mutex<TempSubmitInfo>,
@@ -349,18 +349,18 @@ impl RenderingDevice {
         }
     }
 
-    pub fn new_command_buffer(&self) -> CommandBuffer {
+    pub fn new_command_buffer(&self) -> Box<CommandBuffer> {
         let mut buffers = self.cmd_buffers.lock();
         let mut cmd = if let Some(cmd) = buffers.pop() {
             cmd
         } else {
-            CommandBuffer::new(self, self.queue_families.graphics).unwrap()
+            Box::new(CommandBuffer::new(self, self.queue_families.graphics).unwrap())
         };
         cmd.begin();
         cmd
     }
 
-    pub fn release_command_buffer(&self, mut buffer: CommandBuffer) {
+    pub fn release_command_buffer(&self, mut buffer: Box<CommandBuffer>) {
         buffer.reset();
         self.cmd_buffers.lock().push(buffer);
     }
@@ -380,14 +380,15 @@ impl RenderingDevice {
         }
     }
 
-    pub fn submit<T: IntoIterator<Item = CommandBuffer>>(&self, cmd_buffers: T, image: Option<&SurfaceImage>) -> u64 {
+    pub fn submit<T: IntoIterator<Item = Box<CommandBuffer>>>(&self, cmd_buffers: T, image: Option<&SurfaceImage>) -> u64 {
         let mut temp = self.temp_submit_info.lock();
         temp.clear();
 
         let mut submit_lock = self.submit_mutex.lock();
         let submit_index = *submit_lock;
 
-        for cmd in cmd_buffers.into_iter() {
+        for mut cmd in cmd_buffers.into_iter() {
+            cmd.finish();
             temp.cmd_buffers.push(cmd.raw);
             self.pending_cmd_buffers.lock().push((submit_index, cmd));
         }
@@ -455,7 +456,7 @@ impl RenderingDevice {
             }],
         );
         cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        let id = self.submit([cmd.finish()], None);
+        let id = self.submit([cmd], None);
         self.wait_submission(id);
 
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
@@ -491,7 +492,7 @@ impl RenderingDevice {
                 .image_subresource(subresource)],
         );
         cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        let id = self.submit([cmd.finish()], None);
+        let id = self.submit([cmd], None);
         self.wait_submission(id);
 
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
@@ -508,7 +509,7 @@ impl RenderingDevice {
             &[vk::BufferCopy::default().src_offset(cursor).dst_offset(offset).size(size)],
         );
         cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        self.submit([cmd.finish()], None);
+        self.submit([cmd], None);
     }
 
     pub fn write_image<T>(
@@ -532,7 +533,7 @@ impl RenderingDevice {
                 .image_extent(extent)],
         );
         cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        self.submit([cmd.finish()], None);
+        self.submit([cmd], None);
     }
 
     pub fn init_image<T>(&self, image: &Image, data: &[T]) {

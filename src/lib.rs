@@ -1,10 +1,10 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::ffi::CStr;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use ash::vk;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 mod belt;
 mod buffer;
@@ -51,7 +51,7 @@ pub struct RenderingDeviceDesc<'a> {
     pub app_name: &'a CStr,
     pub gpu_validation: bool,
     pub n_frames: usize,
-    pub pick_device: Option<usize>,                             // index for picking a specific device
+    pub pick_device: Option<usize>,                           // index for picking a specific device
     pub surface: Option<(RawDisplayHandle, RawWindowHandle)>, // None for headless setup
 }
 
@@ -73,10 +73,7 @@ impl RenderingDeviceDesc<'_> {
     }
 
     pub fn with_gpu_validation(self) -> Self {
-        Self {
-            gpu_validation: true,
-            ..self
-        }
+        Self { gpu_validation: true, ..self }
     }
 
     pub fn with_frames(mut self, frames: usize) -> Self {
@@ -87,9 +84,10 @@ impl RenderingDeviceDesc<'_> {
 
 impl Default for RenderingDeviceDesc<'_> {
     fn default() -> Self {
+        let validation = std::env::var("VKA_GPU_VALIDATION").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false);
         Self {
             app_name: c"vka app",
-            gpu_validation: false,
+            gpu_validation: validation,
             n_frames: 2,
             pick_device: None,
             surface: None,

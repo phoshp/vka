@@ -14,7 +14,7 @@ pub fn main() {
     let window = event_loop
         .create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))
         .unwrap();
-    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window).with_gpu_validation()).unwrap();
+    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window)).unwrap();
     let mut color_image = rd.new_image(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
             .samples(4)
@@ -26,6 +26,8 @@ pub fn main() {
             Attachment {
                 format: color_image.format,
                 samples: color_image.samples.as_raw(),
+                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                final_layout: None,
                 ops: Operations::Color {
                     load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Discard,
@@ -34,6 +36,8 @@ pub fn main() {
             Attachment {
                 format: vk::Format::B8G8R8A8_UNORM,
                 samples: 1,
+                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                final_layout: None,
                 ops: Operations::Color {
                     load: LoadOp::Discard,
                     store: StoreOp::Store,
@@ -138,9 +142,10 @@ pub fn main() {
                 let mut cmd = rd.new_command_buffer();
                 let extent = surface.swapchain.extent;
 
+                let views = [color_image.full_view(), frame.image.full_view()];
                 cmd.begin_render_pass(
                     &rpass,
-                    &[color_image.full_view(), frame.image.full_view()],
+                    &views,
                     vk::Rect2D {
                         offset: vk::Offset2D::default(),
                         extent,
@@ -167,9 +172,9 @@ pub fn main() {
                 cmd.bind_pipeline(&pipeline);
                 cmd.bind_vertex_buffers(0, &[vertex_buf.raw], &[0]);
                 cmd.draw(3, 1, 0, 0);
-                cmd.end_render_pass();
+                cmd.end_render_pass(&rpass, &views);
 
-                rd.submit([cmd.finish()], Some(&frame));
+                rd.submit([cmd], Some(&frame));
                 surface.present(&frame);
 
                 frame_count += 1;

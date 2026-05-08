@@ -117,9 +117,8 @@ impl Surface {
                     // Transition image to GENERAL for use.
                     let mut cmd = self.device.new_command_buffer();
                     // let old_layout = if image.image.initialized.load(Ordering::Acquire) { vk::ImageLayout::PRESENT_SRC_KHR } else { vk::ImageLayout::UNDEFINED };
-                    cmd.image_barrier_raw(image.image.raw, image.image.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
-                    self.device.submit([cmd.finish()], Some(&image));
-                    image.image.initialized.store(true, Ordering::Release);
+                    cmd.image_barrier_raw(image.image.raw, image.image.aspect, vk::ImageLayout::PRESENT_SRC_KHR, image.image.optimal_layout);
+                    self.device.submit([cmd], Some(&image));
                 }
 
                 self.acquire_index = (self.acquire_index + 1) % self.acquire_semaphores.len();
@@ -138,8 +137,8 @@ impl Surface {
         {
             // Transition image to PRESENT_SRC_KHR for presentation.
             let mut cmd = self.device.new_command_buffer();
-            cmd.image_barrier_raw(image.image.raw, image.image.aspect, vk::ImageLayout::GENERAL, vk::ImageLayout::PRESENT_SRC_KHR);
-            self.device.submit([cmd.finish()], Some(&image));
+            cmd.image_barrier_raw(image.image.raw, image.image.aspect, image.image.optimal_layout, vk::ImageLayout::PRESENT_SRC_KHR);
+            self.device.submit([cmd], Some(&image));
         }
         let mut present_sem = image.present.lock();
         let present_info = vk::PresentInfoKHR::default()
@@ -371,6 +370,14 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
                 img
             })
             .collect_vec();
+
+        {
+            let mut cmd = rd.new_command_buffer();
+            for image in &images {
+                cmd.image_barrier_raw(image.raw, image.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::PRESENT_SRC_KHR);
+            }
+            rd.submit([cmd], None);
+        }
 
         Ok(Swapchain {
             raw: swapchain,
