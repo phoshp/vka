@@ -14,6 +14,7 @@ pub fn main() {
     let window = event_loop
         .create_window(winit::window::WindowAttributes::default().with_inner_size(winit::dpi::PhysicalSize::new(800, 600)))
         .unwrap();
+    window.set_resizable(false);
     let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window)).unwrap();
     let mut color_image = rd.new_image(
         &ImageDesc::new_2d(vk::Format::B8G8R8A8_UNORM, 800, 600)
@@ -37,7 +38,7 @@ pub fn main() {
                 samples: 1,
                 usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 ops: Operations::Color {
-                    load: LoadOp::Discard,
+                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Store,
                 },
             },
