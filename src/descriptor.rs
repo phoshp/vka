@@ -200,7 +200,7 @@ impl RenderingDevice {
             }
         }
         unsafe {
-            let _idx = self.submit_mutex.lock();
+            // TODO: need a device lock
             self.wait_queue();
             self.raw.update_descriptor_sets(&vk_writes, &[]);
         }

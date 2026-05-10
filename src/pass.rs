@@ -3,7 +3,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use ash::vk;
-use itertools::Itertools;
 use parking_lot::Mutex;
 
 use crate::Color32;

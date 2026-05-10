@@ -12,7 +12,6 @@ use crate::ImageView;
 use crate::Pipeline;
 use crate::PipelineLayout;
 use crate::RenderPass;
-use crate::RenderingDevice;
 
 pub struct CommandEncoder {
     pool: vk::CommandPool,
@@ -36,8 +35,7 @@ const BIND_POINT_NONE: vk::PipelineBindPoint = vk::PipelineBindPoint::from_raw(!
 const CMD_ALLOC_GRANULARITY: u32 = 8;
 
 impl CommandEncoder {
-    pub fn new(rd: &RenderingDevice, family: u32) -> VkResult<Self> {
-        let device = rd.raw.clone();
+    pub fn new(device: &ash::Device, family: u32) -> VkResult<Self> {
         let pool = unsafe {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default().flags(vk::CommandPoolCreateFlags::TRANSIENT).queue_family_index(family),
@@ -57,7 +55,7 @@ impl CommandEncoder {
         Ok(CommandEncoder {
             pool,
             free,
-            device,
+            device: device.clone(),
             active: vk::CommandBuffer::null(),
             bind_point: BIND_POINT_NONE,
         })
@@ -167,17 +165,6 @@ impl CommandEncoder {
                 )
                 .unwrap()
         });
-
-        // for (i, view) in views.iter().enumerate() {
-        //     let image = view.image().expect("ImageView's image was dropped");
-        //     let init_layout = rpass.layouts[i];
-        //     self.image_barrier_raw(
-        //         image.raw,
-        //         image.aspect,
-        //         if init_layout.1 { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL },
-        //         init_layout.0,
-        //     );
-        // }
 
         self.bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
@@ -293,22 +280,12 @@ impl CommandEncoder {
         }
     }
 
-    pub fn end_render_pass(&mut self, rpass: &RenderPass, views: &[&ImageView]) {
+    pub fn end_render_pass(&mut self) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         self.bind_point = BIND_POINT_NONE;
         unsafe {
             self.device.cmd_end_render_pass(self.active);
         }
-        // for (i, view) in views.iter().enumerate() {
-        //     let image = view.image().expect("ImageView's image was dropped");
-        //     let layout = rpass.layouts[i];
-        //     self.image_barrier_raw(
-        //         image.raw,
-        //         image.aspect,
-        //         layout.0,
-        //         vk::ImageLayout::GENERAL
-        //     );
-        // }
     }
 
     pub fn end_rendering(&mut self) {
@@ -377,15 +354,6 @@ impl CommandEncoder {
             self.device
                 .cmd_pipeline_barrier(self.active, src_stages, dst_stages, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
         }
-    }
-
-    pub fn image_barrier(&mut self, image: &Image, mut new_layout: vk::ImageLayout) {
-        // // let mut old_layout = image.layout.lock();
-        // if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {
-        //     new_layout = *old_layout;
-        // }
-        // self.image_barrier_raw(image.raw, image.aspect, *old_layout, new_layout);
-        // *old_layout = new_layout;
     }
 
     pub fn image_barrier_raw(&mut self, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {

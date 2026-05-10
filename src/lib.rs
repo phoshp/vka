@@ -15,7 +15,6 @@ mod image;
 mod pass;
 mod pipeline;
 mod sampler;
-mod semaphore;
 mod shader;
 mod surface;
 
@@ -27,7 +26,6 @@ pub use image::*;
 pub use pass::*;
 pub use pipeline::*;
 pub use sampler::*;
-pub use semaphore::*;
 pub use shader::*;
 pub use surface::*;
 
