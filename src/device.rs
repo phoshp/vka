@@ -569,6 +569,7 @@ impl RenderingDevice {
             );
             encoder.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
         });
+        self.submit();
         self.wait_queue();
 
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
