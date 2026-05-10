@@ -392,6 +392,8 @@ impl RenderingDevice {
                 encoder.cmd_buffers.clear();
             }
             frame.all_cmd_buffers.clear();
+            frame.wait_semaphore = None;
+            frame.signal_semaphore = None;
             frame.state = FrameState::Pending;
         }
     }
