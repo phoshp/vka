@@ -413,12 +413,12 @@ impl RenderingDevice {
     }
 
     pub fn record_frame(&self, surface: &mut Surface, record_fn: impl FnOnce(&mut CommandEncoder, SurfaceImage)) -> Option<SurfaceImage> {
-        let frame_idx = self.frame_counter.read();
-        let mut frame = self.frames[frame_idx.1].lock();
+        let (_, frame_index) = *self.frame_counter.read();
+        let mut frame = self.frames[frame_index].lock();
         self.wait_flush_frame(&mut frame);
 
-        if let Some(image) = unsafe { surface.acquire_next_image_raw(frame_idx.1) } {
-            frame.wait_semaphore = Some(surface.acquire_semaphores[frame_idx.1]);
+        if let Some(image) = unsafe { surface.acquire_next_image_raw(frame_index) } {
+            frame.wait_semaphore = Some(surface.acquire_semaphores[frame_index]);
             frame.signal_semaphore = Some(surface.present_semaphores[image.index as usize]);
 
             let mut encoder = self.pick_encoder(&mut frame);
@@ -436,7 +436,7 @@ impl RenderingDevice {
             let cmd = encoder.inner.end_encoding();
             encoder.cmd_buffers.push(cmd);
 
-            let mut frame = self.frames[frame_idx.1].lock();
+            let mut frame = self.frames[frame_index].lock();
             frame.all_cmd_buffers.push(cmd);
             frame.encoders.push(encoder);
             Some(image)
