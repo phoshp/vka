@@ -479,7 +479,8 @@ impl RenderingDevice {
         let mut frame = self.frames[frame_idx.1].lock();
 
         self.wait_flush_frame(&mut frame);
-        self.staging_belt.lock().maintain(frame_idx.0);
+        let completed_submission = frame_idx.0.saturating_sub(self.frames.len() as u64);
+        self.staging_belt.lock().maintain(completed_submission);
         frame.state = FrameState::Pending;
 
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
