@@ -4,10 +4,12 @@ use ash::vk;
 use ash::{ext::debug_utils, prelude::VkResult};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use itertools::Itertools;
-use parking_lot::Mutex;
+use parking_lot::lock_api::RawMutex;
+use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::{Buffer, CommandBuffer, Image, RelaySemaphores, RenderingDeviceDesc, SurfaceImage, TimelineFence, belt::StagingBelt};
+use crate::Surface;
+use crate::{Buffer, CommandEncoder, Image, RenderingDeviceDesc, SurfaceImage, belt::StagingBelt};
 
 /// Holds indices for the different Vulkan queue families used by the device.
 #[derive(Debug, Clone, Copy)]
@@ -26,23 +28,6 @@ impl Default for QueueFamilies {
             compute: vk::QUEUE_FAMILY_IGNORED,
             transfer: vk::QUEUE_FAMILY_IGNORED,
         }
-    }
-}
-
-#[derive(Default)]
-struct TempSubmitInfo {
-    pub wait_stages: Vec<vk::PipelineStageFlags>,
-    pub wait: Vec<vk::Semaphore>,
-    pub signal: Vec<vk::Semaphore>,
-    pub cmd_buffers: Vec<vk::CommandBuffer>,
-}
-
-impl TempSubmitInfo {
-    pub fn clear(&mut self) {
-        self.wait_stages.clear();
-        self.wait.clear();
-        self.signal.clear();
-        self.cmd_buffers.clear();
     }
 }
 
@@ -105,16 +90,28 @@ pub struct RenderingDeviceImpl {
     pub main_queue: vk::Queue,
     pub present_queue: vk::Queue,
 
-    cmd_buffers: Mutex<Vec<Box<CommandBuffer>>>,
-    pending_cmd_buffers: Mutex<Vec<(u64, Box<CommandBuffer>)>>,
+    pub device_mutex: parking_lot::RawMutex,
 
-    relay_semaphores: Mutex<RelaySemaphores>,
-    temp_submit_info: Mutex<TempSubmitInfo>,
-    pub(crate) fence: Mutex<TimelineFence>,
-    pub staging_belt: Mutex<StagingBelt>,
+    staging_belt: Mutex<StagingBelt>,
+    pub frames: Vec<Mutex<Frame>>,
+    pub frame_counter: RwLock<(u64, usize)>,
+}
 
-    pub submit_mutex: Mutex<u64>,
-    pub device_mutex: Mutex<()>,
+pub struct EncoderInFlight {
+    pub inner: Box<CommandEncoder>,
+    pub cmd_buffers: Vec<vk::CommandBuffer>,
+    pub pending: bool,
+}
+
+pub struct Frame {
+    pub wait_semaphore: Option<vk::Semaphore>,
+    pub signal_semaphore: Option<vk::Semaphore>,
+
+    pub encoders: Vec<EncoderInFlight>,
+    pub all_cmd_buffers: Vec<vk::CommandBuffer>,
+    pub post_encoder: EncoderInFlight,
+
+    pub fence: vk::Fence,
 }
 
 /// A reference-counted wrapper around `RenderingDeviceImpl`, providing convenient access to Vulkan operations.
@@ -345,10 +342,6 @@ impl RenderingDevice {
                 .unwrap(),
             );
 
-            let relay_semaphores = Mutex::new(RelaySemaphores::new(&device));
-            let temp_submit_info = Mutex::new(TempSubmitInfo::default());
-            let fence = Mutex::new(TimelineFence::default());
-
             let shared = Arc::new(SharedDevice {
                 raw: device.clone(),
                 entry,
@@ -359,6 +352,28 @@ impl RenderingDevice {
             if let Some((surface, surface_inst)) = &surface {
                 surface_inst.destroy_surface(*surface, None);
             }
+
+            let frames = (0..desc.n_frames)
+                .map(|_| {
+                    let post_encoder = EncoderInFlight {
+                        inner: Box::new(CommandEncoder::new(&device, queue_families.graphics).unwrap()),
+                        cmd_buffers: Vec::new(),
+                        pending: false,
+                    };
+                    Mutex::new(Frame {
+                        wait_semaphore: None,
+                        signal_semaphore: None,
+                        encoders: Vec::new(),
+                        all_cmd_buffers: Vec::new(),
+                        post_encoder,
+
+                        fence: device
+                            .create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)
+                            .expect("Failed to create frame fence"),
+                    })
+                })
+                .collect_vec();
+            let frame_counter = RwLock::new((0, 0));
 
             let rd = RenderingDevice(Arc::new(RenderingDeviceImpl {
                 raw: device,
@@ -378,102 +393,178 @@ impl RenderingDevice {
                 main_queue,
                 present_queue,
 
-                cmd_buffers: Mutex::new(Vec::new()),
-                pending_cmd_buffers: Mutex::new(Vec::new()),
+                device_mutex: RawMutex::INIT,
 
-                relay_semaphores,
-                temp_submit_info,
-                fence,
                 staging_belt: Mutex::new(StagingBelt::new(4 * 1024 * 1024)),
-
-                submit_mutex: Mutex::new(1),
-                device_mutex: Mutex::new(()),
+                frames,
+                frame_counter,
             }));
             rd.wait_idle();
             Result::Ok(rd)
         }
     }
 
-    pub fn new_command_buffer(&self) -> Box<CommandBuffer> {
-        let mut buffers = self.cmd_buffers.lock();
-        let mut cmd = if let Some(cmd) = buffers.pop() {
-            cmd
-        } else {
-            Box::new(CommandBuffer::new(self, self.queue_families.graphics).unwrap())
-        };
-        cmd.begin();
-        cmd
+    pub fn n_frames(&self) -> usize {
+        self.frames.len()
     }
 
-    pub fn release_command_buffer(&self, mut buffer: Box<CommandBuffer>) {
-        buffer.reset();
-        self.cmd_buffers.lock().push(buffer);
-    }
-
-    fn maintain(&self) {
-        let mut fence = self.fence.lock();
-        fence.maintain(&self.raw);
-
-        self.staging_belt.lock().maintain(fence.last_completed);
-
-        let mut pending_buffers = self.pending_cmd_buffers.lock();
-        let last_pending = pending_buffers.iter().enumerate().rev().find(|(_, val)| val.0 <= fence.last_completed);
-
-        if let Some((index, _)) = last_pending {
-            pending_buffers.drain(..=index).for_each(|(_, buf)| self.release_command_buffer(buf));
-        }
-    }
-
-    pub fn submit<T: IntoIterator<Item = Box<CommandBuffer>>>(&self, cmd_buffers: T, image: Option<&SurfaceImage>) -> u64 {
-        let mut temp = self.temp_submit_info.lock();
-        temp.clear();
-
-        let mut submit_lock = self.submit_mutex.lock();
-        let submit_index = *submit_lock;
-
-        for mut cmd in cmd_buffers.into_iter() {
-            cmd.finish();
-            temp.cmd_buffers.push(cmd.raw);
-            self.pending_cmd_buffers.lock().push((submit_index, cmd));
-        }
-
-        let relay = self.relay_semaphores.lock().advance(&self.raw);
-        if let Some(wait) = relay.wait {
-            temp.wait.push(wait);
-            temp.wait_stages.push(vk::PipelineStageFlags::TOP_OF_PIPE);
-        }
-        temp.signal.push(relay.signal);
-
-        if let Some(image) = &image {
-            let mut acquire = image.acquire.lock();
-            acquire.last_used_submission = submit_index;
-            if acquire.should_wait {
-                temp.wait.push(acquire.acquire);
-                temp.wait_stages.push(vk::PipelineStageFlags::TOP_OF_PIPE);
-                acquire.should_wait = false;
+    pub fn reset_frames(&self) {
+        *self.frame_counter.write() = (0, 0);
+        for frame in &self.frames {
+            let mut frame = frame.lock();
+            unsafe {
+                self.raw.destroy_fence(frame.fence, None);
+                frame.fence = self
+                    .raw
+                    .create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)
+                    .expect("Failed to create frame fence");
             }
-            temp.signal.push(image.present.lock().signal(&self.raw));
+            for mut encoder in frame.encoders.drain(..) {
+                encoder.inner.reset(&encoder.cmd_buffers);
+                encoder.cmd_buffers.clear();
+                encoder.pending = false;
+            }
+            frame.all_cmd_buffers.clear();
+            frame.wait_semaphore = None;
+            frame.signal_semaphore = None;
         }
-
-        self.maintain();
-
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(&temp.cmd_buffers)
-            .wait_dst_stage_mask(&temp.wait_stages)
-            .wait_semaphores(&temp.wait)
-            .signal_semaphores(&temp.signal);
-
-        let fence_raw = self.fence.lock().add(&self.raw, submit_index);
-        unsafe {
-            self.raw.queue_submit(self.main_queue, &[submit_info], fence_raw).unwrap();
-        }
-        *submit_lock += 1;
-        submit_index
     }
 
-    pub fn wait_submission(&self, submission: u64) {
-        self.fence.lock().wait_for(&self.raw, submission);
-        self.maintain();
+    pub fn wait_internal_frame(&self, frame: &mut Frame) {
+        unsafe {
+            self.raw.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
+        }
+        for encoder in frame.encoders.iter_mut() {
+            if encoder.pending {
+                encoder.inner.reset(&encoder.cmd_buffers);
+                encoder.cmd_buffers.clear();
+                encoder.pending = false;
+            }
+        }
+    }
+
+    pub fn record_frame(&self, surface: &mut Surface, record_fn: impl FnOnce(&mut CommandEncoder, SurfaceImage)) {
+        let frame_idx = self.frame_counter.read();
+        let mut frame = self.frames[frame_idx.1].lock();
+        self.wait_internal_frame(&mut frame);
+
+        if let Some(image) = unsafe { surface.acquire_next_image_raw(frame_idx.1) } {
+            frame.wait_semaphore = Some(surface.acquire_semaphores[frame_idx.1]);
+
+            let mut encoder = self.pick_encoder(&mut frame);
+            drop(frame);
+            encoder.inner.begin_encoding();
+
+            encoder
+                .inner
+                .image_barrier_raw(image.inner.raw, image.inner.aspect, vk::ImageLayout::PRESENT_SRC_KHR, image.inner.optimal_layout);
+            record_fn(&mut encoder.inner, image.clone());
+            encoder
+                .inner
+                .image_barrier_raw(image.inner.raw, image.inner.aspect, image.inner.optimal_layout, vk::ImageLayout::PRESENT_SRC_KHR);
+
+            let cmd = encoder.inner.end_encoding();
+            encoder.cmd_buffers.push(cmd);
+
+            let mut frame = self.frames[frame_idx.1].lock();
+            frame.signal_semaphore = Some(surface.present_semaphores[image.index as usize]);
+            frame.all_cmd_buffers.push(cmd);
+            frame.encoders.push(encoder);
+        } else {
+            drop(frame);
+            drop(frame_idx);
+            log::error!("Failed to acquire next image, recreating swapchain");
+            surface.recreate_swapchain();
+        }
+    }
+
+    pub fn record(&self, record_fn: impl FnOnce(&mut CommandEncoder)) {
+        let frame_idx = self.frame_counter.read();
+        let mut frame = self.frames[frame_idx.1].lock();
+        self.wait_internal_frame(&mut frame);
+
+        let mut encoder = self.pick_encoder(&mut frame);
+        drop(frame);
+
+        encoder.inner.begin_encoding();
+        record_fn(&mut encoder.inner);
+        let cmd = encoder.inner.end_encoding();
+        encoder.cmd_buffers.push(cmd);
+
+        let mut frame = self.frames[frame_idx.1].lock();
+        frame.all_cmd_buffers.push(cmd);
+        frame.encoders.push(encoder);
+    }
+
+    fn pick_encoder(&self, frame: &mut Frame) -> EncoderInFlight {
+        match frame.encoders.pop() {
+            Some(e) => e,
+            None => {
+                log::info!("Creating new encoder");
+                let inner = Box::new(CommandEncoder::new(&self.raw, self.queue_families.graphics).unwrap());
+                EncoderInFlight { inner, cmd_buffers: Vec::new(), pending: false }
+            }
+        }
+    }
+
+    pub fn submit(&self) -> u64 {
+        let frame_idx = self.frame_counter.read();
+        let mut frame = self.frames[frame_idx.1].lock();
+
+        self.wait_internal_frame(&mut frame);
+        if frame.all_cmd_buffers.is_empty() {
+            return frame_idx.0;
+        }
+        for encoder in frame.encoders.iter_mut() {
+            encoder.pending = true;
+        }
+
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let mut wait_semaphores = [vk::Semaphore::null()];
+        let mut wait_count = 0;
+
+        if let Some(wait) = frame.wait_semaphore.take() {
+            wait_semaphores[0] = wait;
+            wait_count = 1;
+        }
+        let mut signal_semaphores = [vk::Semaphore::null()];
+        let mut signal_count = 0;
+
+        if let Some(signal) = frame.signal_semaphore.take() {
+            signal_semaphores[0] = signal;
+            signal_count = 1;
+        }
+        let submit_info = vk::SubmitInfo::default()
+            .wait_semaphores(&wait_semaphores[..wait_count])
+            .wait_dst_stage_mask(&wait_stages[..wait_count])
+            .command_buffers(&frame.all_cmd_buffers)
+            .signal_semaphores(&signal_semaphores[..signal_count]);
+
+        unsafe {
+            self.device_mutex.lock();
+            self.raw.reset_fences(&[frame.fence]).unwrap();
+            self.raw.queue_submit(self.main_queue, &[submit_info], frame.fence).unwrap();
+            self.device_mutex.unlock();
+        }
+        frame.all_cmd_buffers.clear();
+        frame_idx.0
+    }
+
+    pub fn advance_frame(&self) {
+        let mut frame_idx = self.frame_counter.write();
+        let completed_submission = frame_idx.0.saturating_sub(self.frames.len() as u64);
+        self.staging_belt.lock().maintain(completed_submission);
+
+        frame_idx.0 += 1;
+        frame_idx.1 = frame_idx.0 as usize % self.frames.len();
+    }
+
+    pub fn wait_for(&self, frame_num: u64) {
+        let frame_idx = self.frame_counter.read();
+        if frame_num >= frame_idx.0.saturating_sub(self.n_frames() as u64) {
+            let target = frame_num % self.frames.len() as u64;
+            self.wait_internal_frame(&mut self.frames[target as usize].lock());
+        }
     }
 
     /// Blocks until the main queue goes idle.
@@ -492,20 +583,21 @@ impl RenderingDevice {
 
     pub fn read_buffer(&self, buffer: &Buffer, data: &mut [u8], offset: u64) {
         let (staging_buffer, ptr) = self.staging_belt.lock().download(self, data.len() as u64);
-        let mut cmd = self.new_command_buffer();
-        cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
-        cmd.copy_buffer(
-            buffer,
-            &staging_buffer,
-            &[vk::BufferCopy {
-                src_offset: offset,
-                dst_offset: 0,
-                size: data.len() as u64,
-            }],
-        );
-        cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        let id = self.submit([cmd], None);
-        self.wait_submission(id);
+        self.record(|encoder| {
+            encoder.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            encoder.copy_buffer(
+                buffer,
+                &staging_buffer,
+                &[vk::BufferCopy {
+                    src_offset: offset,
+                    dst_offset: 0,
+                    size: data.len() as u64,
+                }],
+            );
+            encoder.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+        self.submit();
+        self.wait_queue();
 
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         data.copy_from_slice(read);
@@ -517,23 +609,24 @@ impl RenderingDevice {
 
         let (staging_buffer, ptr) = self.staging_belt.lock().download(self, size);
 
-        let mut cmd = self.new_command_buffer();
-        cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
-        cmd.copy_image_to_buffer(
-            image,
-            &staging_buffer,
-            &[vk::BufferImageCopy::default()
-                .image_offset(offset)
-                .image_extent(vk::Extent3D {
-                    width: extent.width,
-                    height: extent.height,
-                    depth: extent.depth,
-                })
-                .image_subresource(subresource)],
-        );
-        cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        let id = self.submit([cmd], None);
-        self.wait_submission(id);
+        self.record(|encoder| {
+            encoder.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            encoder.copy_image_to_buffer(
+                image,
+                &staging_buffer,
+                &[vk::BufferImageCopy::default()
+                    .image_offset(offset)
+                    .image_extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: extent.depth,
+                    })
+                    .image_subresource(subresource)],
+            );
+            encoder.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
+        self.submit();
+        self.wait_queue();
 
         let read = unsafe { std::slice::from_raw_parts(ptr, data.len()) };
         data.copy_from_slice(read);
@@ -541,28 +634,28 @@ impl RenderingDevice {
 
     pub fn write_buffer<T>(&self, buffer: &Buffer, data: &[T], offset: u64) {
         let (staging_buf, cursor, size) = self.staging_belt.lock().upload(self, crate::bytes_of(data));
-        let mut cmd = self.new_command_buffer();
-        cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
-        cmd.copy_buffer(&staging_buf, buffer, &[vk::BufferCopy::default().src_offset(cursor).dst_offset(offset).size(size)]);
-        cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        self.submit([cmd], None);
+        self.record(|cmd| {
+            cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            cmd.copy_buffer(&staging_buf, buffer, &[vk::BufferCopy::default().src_offset(cursor).dst_offset(offset).size(size)]);
+            cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
     }
 
     pub fn write_image<T>(&self, image: &Image, data: &[T], offset: vk::Offset3D, extent: vk::Extent3D, subresource: vk::ImageSubresourceLayers) {
         let (staging_buf, cursor, _) = self.staging_belt.lock().upload(self, crate::bytes_of(data));
-        let mut cmd = self.new_command_buffer();
-        cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
-        cmd.copy_buffer_to_image(
-            &staging_buf,
-            image,
-            &[vk::BufferImageCopy::default()
-                .buffer_offset(cursor)
-                .image_subresource(subresource)
-                .image_offset(offset)
-                .image_extent(extent)],
-        );
-        cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
-        self.submit([cmd], None);
+        self.record(|cmd| {
+            cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            cmd.copy_buffer_to_image(
+                &staging_buf,
+                image,
+                &[vk::BufferImageCopy::default()
+                    .buffer_offset(cursor)
+                    .image_subresource(subresource)
+                    .image_offset(offset)
+                    .image_extent(extent)],
+            );
+            cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+        });
     }
 
     pub fn init_image<T>(&self, image: &Image, data: &[T]) {
@@ -584,8 +677,11 @@ impl Drop for RenderingDeviceImpl {
             if let Some(debug_utils) = &self.extensions.debug_utils {
                 debug_utils.instance.destroy_debug_utils_messenger(debug_utils.messenger, None);
             }
-            self.relay_semaphores.lock().destroy(&self.raw);
-            self.fence.lock().destroy(&self.raw);
+            for frame in &self.frames {
+                let frame = frame.lock();
+                self.raw.destroy_fence(frame.fence, None);
+            }
+            self.frames.clear();
         }
     }
 }

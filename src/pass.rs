@@ -120,7 +120,7 @@ impl RenderingDevice {
                         stencil_store,
                     } => (conv_load_op(&load), conv_store_op(&store), conv_load_op(&stencil_load), conv_store_op(&stencil_store)),
                 };
-                let layout = crate::find_optimal_image_layout(a.usage);
+                let layout = crate::find_optimal_layout(a.usage);
                 vk::AttachmentDescription::default()
                     .format(a.format)
                     .samples(vk::SampleCountFlags::from_raw(a.samples))
@@ -216,15 +216,6 @@ impl RenderingDevice {
             );
             prev_subpass = i as u32;
         }
-        dependencies.push(
-            vk::SubpassDependency::default()
-                .src_subpass(prev_subpass)
-                .dst_subpass(vk::SUBPASS_EXTERNAL)
-                .src_stage_mask(vk::PipelineStageFlags::ALL_COMMANDS)
-                .dst_stage_mask(vk::PipelineStageFlags::ALL_COMMANDS)
-                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE),
-        );
 
         let raw = unsafe {
             self.raw

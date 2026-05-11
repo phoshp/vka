@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use ash::vk;
 use itertools::Itertools;
+use parking_lot::lock_api::RawMutex;
 
 use crate::RenderingDevice;
 use crate::SharedDevice;
@@ -200,9 +201,10 @@ impl RenderingDevice {
             }
         }
         unsafe {
-            let _idx = self.submit_mutex.lock();
+            self.device_mutex.lock();
             self.wait_queue();
             self.raw.update_descriptor_sets(&vk_writes, &[]);
+            self.device_mutex.unlock();
         }
     }
 }

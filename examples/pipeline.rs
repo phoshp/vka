@@ -29,7 +29,7 @@ pub fn main() {
                 samples: color_image.samples.as_raw(),
                 usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 ops: Operations::Color {
-                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
+                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 0.5)),
                     store: StoreOp::Discard,
                 },
             },
@@ -66,19 +66,20 @@ pub fn main() {
     let vertices = [
         Vertex {
             pos: [0.0, -0.5, 0.0, 1.0],
-            color: [1.0, 0.0, 0.0, 1.0],
+            color: [1.0, 0.0, 0.0, 0.5],
         },
         Vertex {
             pos: [0.5, 0.5, 0.0, 1.0],
-            color: [0.0, 1.0, 0.0, 1.0],
+            color: [0.0, 1.0, 0.0, 0.5],
         },
         Vertex {
             pos: [-0.5, 0.5, 0.0, 1.0],
-            color: [0.0, 0.0, 1.0, 1.0],
+            color: [0.0, 0.0, 1.0, 0.5],
         },
     ];
     let vertex_buf = rd.new_buffer(&BufferDesc::vertex((std::mem::size_of::<Vertex>() * 3) as u64));
     rd.write_buffer(&vertex_buf, &vertices, 0);
+    rd.submit();
     rd.wait_queue();
 
     let attributes = vertex_attributes! {
@@ -121,7 +122,7 @@ pub fn main() {
         },
         depth_stencil: None,
         color_blend: ColorBlendState {
-            attachments: &[COLOR_BLEND_ALPHA],
+            attachments: &[COLOR_BLEND_REPLACE],
             ..Default::default()
         },
         render_pass: Some(&rpass),
@@ -132,49 +133,53 @@ pub fn main() {
     let mut frame_count = 0;
     let mut fps = 0.0;
 
+    let buffer = rd.new_buffer(&BufferDesc::uniform(4 * 1024));
+
     let mut surface = rd.new_surface(&window, vka::SurfaceConfig::default());
 
     event_loop.run(|event, event_loop| match event {
         winit::event::Event::WindowEvent { event, .. } => match event {
             winit::event::WindowEvent::RedrawRequested => {
-                let frame = surface.acquire();
-                let mut cmd = rd.new_command_buffer();
                 let extent = surface.swapchain.extent;
+                rd.record_frame(&mut surface, |cmd, image| {
+                    let views = [color_image.full_view(), image.inner.full_view()];
+                    cmd.begin_render_pass(
+                        &rpass,
+                        &views,
+                        vk::Rect2D {
+                            offset: vk::Offset2D::default(),
+                            extent,
+                        },
+                    );
+                    cmd.set_viewport(
+                        0,
+                        &[vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: extent.width as f32,
+                            height: extent.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        }],
+                    );
+                    cmd.set_scissor(
+                        0,
+                        &[vk::Rect2D {
+                            offset: vk::Offset2D::default(),
+                            extent,
+                        }],
+                    );
+                    cmd.bind_pipeline(&pipeline);
+                    cmd.bind_vertex_buffers(0, &[vertex_buf.raw], &[0]);
+                    cmd.draw(3, 1, 0, 0);
+                    cmd.end_render_pass();
 
-                let views = [color_image.full_view(), frame.image.full_view()];
-                cmd.begin_render_pass(
-                    &rpass,
-                    &views,
-                    vk::Rect2D {
-                        offset: vk::Offset2D::default(),
-                        extent,
-                    },
-                );
-                cmd.set_viewport(
-                    0,
-                    &[vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: extent.width as f32,
-                        height: extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    }],
-                );
-                cmd.set_scissor(
-                    0,
-                    &[vk::Rect2D {
-                        offset: vk::Offset2D::default(),
-                        extent,
-                    }],
-                );
-                cmd.bind_pipeline(&pipeline);
-                cmd.bind_vertex_buffers(0, &[vertex_buf.raw], &[0]);
-                cmd.draw(3, 1, 0, 0);
-                cmd.end_render_pass();
-
-                rd.submit([cmd], Some(&frame));
-                surface.present(&frame);
+                    // let mut data = [0u8; 4];
+                    // rd.read_buffer(&buffer, &mut data, 0); // we can submit mid-frame
+                });
+                rd.submit();
+                surface.present();
+                rd.advance_frame();
 
                 frame_count += 1;
                 let elapsed = fps_timer.elapsed();
@@ -209,29 +214,4 @@ pub fn main() {
         },
         _ => (),
     });
-
-    rd.wait_queue();
-
-    // let image = rd.acquire_swapchain_image().unwrap();
-    // let mut data = vec![0u8; 800 * 400 * 4 * image.samples.as_raw() as usize];
-    // rd.read_image(
-    //     &image,
-    //     &mut data,
-    //     vk::Offset3D { x: 64, y: 64, z: 0 },
-    //     vk::Extent3D {
-    //         width: 800,
-    //         height: 400,
-    //         depth: 1,
-    //     },
-    //     4,
-    //     vk::ImageSubresourceLayers {
-    //         aspect_mask: vk::ImageAspectFlags::COLOR,
-    //         mip_level: 0,
-    //         base_array_layer: 0,
-    //         layer_count: 1,
-    //     },
-    // )?;
-    // let mut native_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(800, 400, data.as_mut()).unwrap();
-    // native_img.save("examples/frame.png")?;
-    // println!("Saved frame.png");
 }

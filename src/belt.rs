@@ -38,7 +38,7 @@ impl StagingBelt {
     pub fn upload(&mut self, rd: &RenderingDevice, data: &[u8]) -> (Buffer, u64, u64) {
         let size = size_of_val(data) as u64;
         assert!(size > 0, "Tried to upload zero bytes to buffer");
-        let submission = *rd.submit_mutex.lock();
+        let submission = rd.frame_counter.read();
         let index = if let Some(i) = self.active_chunks.iter().position(|c| c.can_allocate(size)) {
             i
         } else {
@@ -51,13 +51,13 @@ impl StagingBelt {
             self.active_chunks.push(StagingChunk {
                 buffer,
                 cursor: 0,
-                last_used_submission: submission,
+                last_used_submission: submission.0,
             });
             self.active_chunks.len() - 1
         };
 
         let chunk = &mut self.active_chunks[index];
-        chunk.last_used_submission = submission;
+        chunk.last_used_submission = submission.0;
         let offset = chunk.allocate(size);
         let ptr = chunk.buffer.alloc.mapped_ptr().unwrap().as_ptr() as *mut u8;
         unsafe {

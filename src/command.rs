@@ -12,17 +12,17 @@ use crate::ImageView;
 use crate::Pipeline;
 use crate::PipelineLayout;
 use crate::RenderPass;
-use crate::RenderingDevice;
 
-pub struct CommandBuffer {
-    pub raw: vk::CommandBuffer,
+pub struct CommandEncoder {
     pool: vk::CommandPool,
+    free: Vec<vk::CommandBuffer>,
     device: ash::Device,
-    pending: bool,
+
+    active: vk::CommandBuffer,
     bind_point: vk::PipelineBindPoint,
 }
 
-impl Drop for CommandBuffer {
+impl Drop for CommandEncoder {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_command_pool(self.pool, None);
@@ -32,60 +32,74 @@ impl Drop for CommandBuffer {
 
 const BIND_POINT_NONE: vk::PipelineBindPoint = vk::PipelineBindPoint::from_raw(!0);
 
-impl CommandBuffer {
-    pub fn new(rd: &RenderingDevice, family: u32) -> VkResult<Self> {
-        let device = rd.raw.clone();
+const CMD_ALLOC_GRANULARITY: u32 = 8;
+
+impl CommandEncoder {
+    pub fn new(device: &ash::Device, family: u32) -> VkResult<Self> {
         let pool = unsafe {
             device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                    .queue_family_index(family),
+                &vk::CommandPoolCreateInfo::default().flags(vk::CommandPoolCreateFlags::TRANSIENT).queue_family_index(family),
                 None,
             )?
         };
-        let raw = unsafe {
+        let free = unsafe {
             device
                 .allocate_command_buffers(
                     &vk::CommandBufferAllocateInfo::default()
                         .command_pool(pool)
                         .level(vk::CommandBufferLevel::PRIMARY)
-                        .command_buffer_count(1),
+                        .command_buffer_count(CMD_ALLOC_GRANULARITY),
                 )
-                .unwrap()[0]
+                .unwrap()
         };
-        Ok(CommandBuffer {
-            raw,
+        Ok(CommandEncoder {
             pool,
-            device,
-            pending: false,
+            free,
+            device: device.clone(),
+            active: vk::CommandBuffer::null(),
             bind_point: BIND_POINT_NONE,
         })
     }
 
-    pub(crate) fn begin(&mut self) {
+    pub(crate) fn begin_encoding(&mut self) {
         unsafe {
-            assert!(!self.pending, "Command buffer is still pending execution");
+            if let Some(cmd) = self.free.pop() {
+                self.active = cmd;
+            } else {
+                self.free.extend(
+                    self.device
+                        .allocate_command_buffers(
+                            &vk::CommandBufferAllocateInfo::default()
+                                .command_pool(self.pool)
+                                .level(vk::CommandBufferLevel::PRIMARY)
+                                .command_buffer_count(CMD_ALLOC_GRANULARITY),
+                        )
+                        .unwrap(),
+                );
+                self.active = self.free.pop().unwrap();
+            }
+
             self.device
-                .begin_command_buffer(self.raw, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+                .begin_command_buffer(self.active, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
                 .unwrap();
             self.bind_point = BIND_POINT_NONE;
         }
     }
 
-    pub(crate) fn finish(&mut self) {
+    pub(crate) fn end_encoding(&mut self) -> vk::CommandBuffer {
         unsafe {
-            self.device.end_command_buffer(self.raw).unwrap();
+            self.device.end_command_buffer(self.active).unwrap();
         }
         self.bind_point = BIND_POINT_NONE;
-        self.pending = true;
+        self.active
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn reset(&mut self, cmd_buffers: &[vk::CommandBuffer]) {
         unsafe {
             self.device.reset_command_pool(self.pool, vk::CommandPoolResetFlags::default()).unwrap();
         }
         self.bind_point = BIND_POINT_NONE;
-        self.pending = false;
+        self.free.extend(cmd_buffers);
     }
 
     #[inline]
@@ -100,11 +114,11 @@ impl CommandBuffer {
 }
 
 /// Base Pass
-impl CommandBuffer {
+impl CommandEncoder {
     pub fn bind_pipeline(&mut self, pipeline: &Pipeline) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS, vk::PipelineBindPoint::COMPUTE]);
         unsafe {
-            self.device.cmd_bind_pipeline(self.raw, self.bind_point, pipeline.raw);
+            self.device.cmd_bind_pipeline(self.active, self.bind_point, pipeline.raw);
         }
     }
 
@@ -112,20 +126,20 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS, vk::PipelineBindPoint::COMPUTE]);
         unsafe {
             self.device
-                .cmd_bind_descriptor_sets(self.raw, self.bind_point, layout, first_set, descriptor_sets, dynamic_offsets);
+                .cmd_bind_descriptor_sets(self.active, self.bind_point, layout, first_set, descriptor_sets, dynamic_offsets);
         }
     }
 
     pub fn push_constants(&mut self, pipeline_layout: &PipelineLayout, offset: u32, data: &[u8]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS, vk::PipelineBindPoint::COMPUTE]);
         unsafe {
-            self.device.cmd_push_constants(self.raw, pipeline_layout.raw, vk::ShaderStageFlags::ALL, offset, data);
+            self.device.cmd_push_constants(self.active, pipeline_layout.raw, vk::ShaderStageFlags::ALL, offset, data);
         }
     }
 }
 
 /// Render Pass
-impl CommandBuffer {
+impl CommandEncoder {
     pub fn begin_render_pass(&mut self, rpass: &RenderPass, views: &[&ImageView], area: vk::Rect2D) {
         self.check_bind_point(&[BIND_POINT_NONE]);
 
@@ -155,7 +169,7 @@ impl CommandBuffer {
         self.bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
             self.device.cmd_begin_render_pass(
-                self.raw,
+                self.active,
                 &vk::RenderPassBeginInfo::default()
                     .render_pass(rpass.raw)
                     .framebuffer(framebuffer)
@@ -169,42 +183,42 @@ impl CommandBuffer {
     pub fn clear_attachments(&mut self, attachments: &[vk::ClearAttachment], rects: &[vk::ClearRect]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_clear_attachments(self.raw, attachments, rects);
+            self.device.cmd_clear_attachments(self.active, attachments, rects);
         }
     }
 
     pub fn bind_index_buffer(&mut self, buffer: &Buffer, offset: vk::DeviceSize, index_type: vk::IndexType) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_bind_index_buffer(self.raw, buffer.raw, offset, index_type);
+            self.device.cmd_bind_index_buffer(self.active, buffer.raw, offset, index_type);
         }
     }
 
     pub fn bind_vertex_buffers(&mut self, first_binding: u32, buffers: &[vk::Buffer], offsets: &[vk::DeviceSize]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_bind_vertex_buffers(self.raw, first_binding, buffers, offsets);
+            self.device.cmd_bind_vertex_buffers(self.active, first_binding, buffers, offsets);
         }
     }
 
     pub fn set_viewport(&mut self, first_viewport: u32, viewports: &[vk::Viewport]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_viewport(self.raw, first_viewport, viewports);
+            self.device.cmd_set_viewport(self.active, first_viewport, viewports);
         }
     }
 
     pub fn set_scissor(&mut self, first_scissor: u32, scissors: &[vk::Rect2D]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_scissor(self.raw, first_scissor, scissors);
+            self.device.cmd_set_scissor(self.active, first_scissor, scissors);
         }
     }
 
     pub fn set_line_width(&mut self, line_width: f32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_line_width(self.raw, line_width);
+            self.device.cmd_set_line_width(self.active, line_width);
         }
     }
 
@@ -212,42 +226,42 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
             self.device
-                .cmd_set_depth_bias(self.raw, depth_bias_constant_factor, depth_bias_clamp, depth_bias_slope_factor);
+                .cmd_set_depth_bias(self.active, depth_bias_constant_factor, depth_bias_clamp, depth_bias_slope_factor);
         }
     }
 
     pub fn set_depth_bounds(&mut self, min_depth_bounds: f32, max_depth_bounds: f32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_depth_bounds(self.raw, min_depth_bounds, max_depth_bounds);
+            self.device.cmd_set_depth_bounds(self.active, min_depth_bounds, max_depth_bounds);
         }
     }
 
     pub fn set_blend_constants(&mut self, blend_constants: &[f32; 4]) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_blend_constants(self.raw, blend_constants);
+            self.device.cmd_set_blend_constants(self.active, blend_constants);
         }
     }
 
     pub fn set_stencil_compare_mask(&mut self, face_mask: vk::StencilFaceFlags, stencil_compare_mask: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_stencil_compare_mask(self.raw, face_mask, stencil_compare_mask);
+            self.device.cmd_set_stencil_compare_mask(self.active, face_mask, stencil_compare_mask);
         }
     }
 
     pub fn set_stencil_write_mask(&mut self, face_mask: vk::StencilFaceFlags, stencil_write_mask: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_stencil_write_mask(self.raw, face_mask, stencil_write_mask);
+            self.device.cmd_set_stencil_write_mask(self.active, face_mask, stencil_write_mask);
         }
     }
 
     pub fn set_stencil_reference(&mut self, face_mask: vk::StencilFaceFlags, stencil_reference: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_set_stencil_reference(self.raw, face_mask, stencil_reference);
+            self.device.cmd_set_stencil_reference(self.active, face_mask, stencil_reference);
         }
     }
 
@@ -255,14 +269,14 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         self.bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
-            self.device.cmd_begin_rendering(self.raw, rendering_info);
+            self.device.cmd_begin_rendering(self.active, rendering_info);
         }
     }
 
     pub fn next_subpass(&mut self) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_next_subpass(self.raw, vk::SubpassContents::INLINE);
+            self.device.cmd_next_subpass(self.active, vk::SubpassContents::INLINE);
         }
     }
 
@@ -270,7 +284,7 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         self.bind_point = BIND_POINT_NONE;
         unsafe {
-            self.device.cmd_end_render_pass(self.raw);
+            self.device.cmd_end_render_pass(self.active);
         }
     }
 
@@ -278,14 +292,14 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         self.bind_point = BIND_POINT_NONE;
         unsafe {
-            self.device.cmd_end_rendering(self.raw);
+            self.device.cmd_end_rendering(self.active);
         }
     }
 
     pub fn draw(&mut self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_draw(self.raw, vertex_count, instance_count, first_vertex, first_instance);
+            self.device.cmd_draw(self.active, vertex_count, instance_count, first_vertex, first_instance);
         }
     }
 
@@ -293,21 +307,21 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
             self.device
-                .cmd_draw_indexed(self.raw, index_count, instance_count, first_index, vertex_offset, first_instance);
+                .cmd_draw_indexed(self.active, index_count, instance_count, first_index, vertex_offset, first_instance);
         }
     }
 
     pub fn draw_indirect(&mut self, buffer: &Buffer, offset: vk::DeviceSize, draw_count: u32, stride: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_draw_indirect(self.raw, buffer.raw, offset, draw_count, stride);
+            self.device.cmd_draw_indirect(self.active, buffer.raw, offset, draw_count, stride);
         }
     }
 
     pub fn draw_indexed_indirect(&mut self, buffer: &Buffer, offset: vk::DeviceSize, draw_count: u32, stride: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
-            self.device.cmd_draw_indexed_indirect(self.raw, buffer.raw, offset, draw_count, stride);
+            self.device.cmd_draw_indexed_indirect(self.active, buffer.raw, offset, draw_count, stride);
         }
     }
 
@@ -317,7 +331,7 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
             self.device
-                .cmd_draw_indirect_count(self.raw, buffer.raw, offset, count_buffer.raw, count_offset, max_draw_count, stride);
+                .cmd_draw_indirect_count(self.active, buffer.raw, offset, count_buffer.raw, count_offset, max_draw_count, stride);
         }
     }
 
@@ -325,20 +339,20 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::GRAPHICS]);
         unsafe {
             self.device
-                .cmd_draw_indexed_indirect_count(self.raw, buffer.raw, offset, count_buffer.raw, count_offset, max_draw_count, stride);
+                .cmd_draw_indexed_indirect_count(self.active, buffer.raw, offset, count_buffer.raw, count_offset, max_draw_count, stride);
         }
     }
 }
 
 /// Memory Barriers
-impl CommandBuffer {
+impl CommandEncoder {
     pub fn barrier(&mut self, src_stages: vk::PipelineStageFlags, dst_stages: vk::PipelineStageFlags) {
         unsafe {
             let barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
                 .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
             self.device
-                .cmd_pipeline_barrier(self.raw, src_stages, dst_stages, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
+                .cmd_pipeline_barrier(self.active, src_stages, dst_stages, vk::DependencyFlags::empty(), &[barrier], &[], &[]);
         }
     }
 
@@ -393,13 +407,13 @@ impl CommandBuffer {
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
             self.device
-                .cmd_pipeline_barrier(self.raw, src_stages, dst_stages, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
+                .cmd_pipeline_barrier(self.active, src_stages, dst_stages, vk::DependencyFlags::empty(), &[], &[], &[barrier]);
         }
     }
 }
 
 /// Compute Pass
-impl CommandBuffer {
+impl CommandEncoder {
     pub fn begin_compute_pass(&mut self) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         self.bind_point = vk::PipelineBindPoint::COMPUTE;
@@ -408,14 +422,14 @@ impl CommandBuffer {
     pub fn dispatch(&self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
         self.check_bind_point(&[vk::PipelineBindPoint::COMPUTE]);
         unsafe {
-            self.device.cmd_dispatch(self.raw, group_count_x, group_count_y, group_count_z);
+            self.device.cmd_dispatch(self.active, group_count_x, group_count_y, group_count_z);
         }
     }
 
     pub fn dispatch_indirect(&self, buffer: &Buffer, offset: vk::DeviceSize) {
         self.check_bind_point(&[vk::PipelineBindPoint::COMPUTE]);
         unsafe {
-            self.device.cmd_dispatch_indirect(self.raw, buffer.raw, offset);
+            self.device.cmd_dispatch_indirect(self.active, buffer.raw, offset);
         }
     }
 
@@ -423,7 +437,7 @@ impl CommandBuffer {
         self.check_bind_point(&[vk::PipelineBindPoint::COMPUTE]);
         unsafe {
             self.device
-                .cmd_dispatch_base(self.raw, base_group_x, base_group_y, base_group_z, group_count_x, group_count_y, group_count_z);
+                .cmd_dispatch_base(self.active, base_group_x, base_group_y, base_group_z, group_count_x, group_count_y, group_count_z);
         }
     }
 
@@ -434,11 +448,11 @@ impl CommandBuffer {
 }
 
 /// Transfer
-impl CommandBuffer {
+impl CommandEncoder {
     pub fn copy_buffer(&mut self, src_buffer: &Buffer, dst_buffer: &Buffer, regions: &[vk::BufferCopy]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_copy_buffer(self.raw, src_buffer.raw, dst_buffer.raw, regions);
+            self.device.cmd_copy_buffer(self.active, src_buffer.raw, dst_buffer.raw, regions);
         }
     }
 
@@ -446,7 +460,7 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
             self.device.cmd_copy_image(
-                self.raw,
+                self.active,
                 src_image.raw,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 dst_image.raw,
@@ -460,7 +474,7 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
             self.device
-                .cmd_copy_buffer_to_image(self.raw, src_buffer.raw, dst_image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, regions);
+                .cmd_copy_buffer_to_image(self.active, src_buffer.raw, dst_image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, regions);
         }
     }
 
@@ -468,7 +482,7 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
             self.device
-                .cmd_copy_image_to_buffer(self.raw, src_image.raw, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, dst_buffer.raw, regions);
+                .cmd_copy_image_to_buffer(self.active, src_image.raw, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, dst_buffer.raw, regions);
         }
     }
 
@@ -476,7 +490,7 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
             self.device.cmd_blit_image(
-                self.raw,
+                self.active,
                 src_image.raw,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 dst_image.raw,
@@ -490,14 +504,14 @@ impl CommandBuffer {
     pub fn fill_buffer(&mut self, dst_buffer: &Buffer, dst_offset: vk::DeviceSize, size: vk::DeviceSize, data: u32) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_fill_buffer(self.raw, dst_buffer.raw, dst_offset, size, data);
+            self.device.cmd_fill_buffer(self.active, dst_buffer.raw, dst_offset, size, data);
         }
     }
 
     pub fn update_buffer(&mut self, dst_buffer: &Buffer, dst_offset: vk::DeviceSize, data: &[u8]) {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
-            self.device.cmd_update_buffer(self.raw, dst_buffer.raw, dst_offset, data);
+            self.device.cmd_update_buffer(self.active, dst_buffer.raw, dst_offset, data);
         }
     }
 
@@ -505,7 +519,7 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
             self.device
-                .cmd_clear_color_image(self.raw, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &color, ranges);
+                .cmd_clear_color_image(self.active, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &color, ranges);
         }
     }
 
@@ -513,28 +527,28 @@ impl CommandBuffer {
         self.check_bind_point(&[BIND_POINT_NONE]);
         unsafe {
             self.device
-                .cmd_clear_depth_stencil_image(self.raw, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &depth_stencil, ranges);
+                .cmd_clear_depth_stencil_image(self.active, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &depth_stencil, ranges);
         }
     }
 }
 
 /// Queries
-impl CommandBuffer {
+impl CommandEncoder {
     pub fn begin_query(&mut self, query_pool: vk::QueryPool, query: u32, flags: vk::QueryControlFlags) {
         unsafe {
-            self.device.cmd_begin_query(self.raw, query_pool, query, flags);
+            self.device.cmd_begin_query(self.active, query_pool, query, flags);
         }
     }
 
     pub fn end_query(&mut self, query_pool: vk::QueryPool, query: u32) {
         unsafe {
-            self.device.cmd_end_query(self.raw, query_pool, query);
+            self.device.cmd_end_query(self.active, query_pool, query);
         }
     }
 
     pub fn reset_query_pool(&mut self, query_pool: vk::QueryPool, first_query: u32, query_count: u32) {
         unsafe {
-            self.device.cmd_reset_query_pool(self.raw, query_pool, first_query, query_count);
+            self.device.cmd_reset_query_pool(self.active, query_pool, first_query, query_count);
         }
     }
 
@@ -550,25 +564,25 @@ impl CommandBuffer {
     ) {
         unsafe {
             self.device
-                .cmd_copy_query_pool_results(self.raw, query_pool, first_query, query_count, dst_buffer.raw, dst_offset, stride, flags);
+                .cmd_copy_query_pool_results(self.active, query_pool, first_query, query_count, dst_buffer.raw, dst_offset, stride, flags);
         }
     }
 
     pub fn write_timestamp(&mut self, pipeline_stage: vk::PipelineStageFlags, query_pool: vk::QueryPool, query: u32) {
         unsafe {
-            self.device.cmd_write_timestamp(self.raw, pipeline_stage, query_pool, query);
+            self.device.cmd_write_timestamp(self.active, pipeline_stage, query_pool, query);
         }
     }
 
     pub fn execute_commands(&mut self, command_buffers: &[vk::CommandBuffer]) {
         unsafe {
-            self.device.cmd_execute_commands(self.raw, command_buffers);
+            self.device.cmd_execute_commands(self.active, command_buffers);
         }
     }
 
     pub fn set_device_mask(&self, device_mask: u32) {
         unsafe {
-            self.device.cmd_set_device_mask(self.raw, device_mask);
+            self.device.cmd_set_device_mask(self.active, device_mask);
         }
     }
 }

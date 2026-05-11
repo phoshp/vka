@@ -1,11 +1,9 @@
 use std::slice;
-use std::sync::Arc;
 
 use ash::prelude::VkResult;
 use ash::vk;
 use ash::vk::SurfaceFormatKHR;
 use itertools::Itertools;
-use parking_lot::Mutex;
 use raw_window_handle::HasDisplayHandle;
 use raw_window_handle::HasWindowHandle;
 use raw_window_handle::RawDisplayHandle;
@@ -41,119 +39,64 @@ pub struct Surface {
     pub config: SurfaceConfig,
     device: RenderingDevice,
 
-    pub acquire_semaphores: Vec<Arc<Mutex<AcquireSemaphore>>>,
-    pub present_semaphores: Vec<Arc<Mutex<PresentSemaphores>>>,
-    pub acquire_index: usize,
+    pub acquire_semaphores: Vec<vk::Semaphore>,
+    pub present_semaphores: Vec<vk::Semaphore>,
+    pub current_image: Option<SurfaceImage>,
     pub fence: vk::Fence,
-}
-
-pub struct AcquireSemaphore {
-    pub acquire: vk::Semaphore,
-    pub should_wait: bool,
-    pub last_used_submission: u64,
-}
-
-pub struct PresentSemaphores {
-    pub present: Vec<vk::Semaphore>,
-    pub count: u32,
-}
-
-impl PresentSemaphores {
-    pub fn get_waits(&self) -> &[vk::Semaphore] {
-        &self.present[..self.count as usize]
-    }
-
-    pub fn signal(&mut self, device: &ash::Device) -> vk::Semaphore {
-        let sem = match self.present.get(self.count as usize) {
-            Some(sem) => *sem,
-            None => {
-                let sem = unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() };
-                self.present.push(sem);
-                sem
-            }
-        };
-        self.count += 1;
-        sem
-    }
 }
 
 #[derive(Clone)]
 pub struct SurfaceImage {
-    pub image: Image,
+    pub inner: Image,
     pub index: u32,
-
-    pub(crate) acquire: Arc<Mutex<AcquireSemaphore>>,
-    pub(crate) present: Arc<Mutex<PresentSemaphores>>,
+    pub frame_index: usize,
 }
 
 impl Surface {
-    pub fn acquire(&mut self) -> SurfaceImage {
-        let acquire_sem = self.acquire_semaphores[self.acquire_index].lock();
-        self.device.wait_submission(acquire_sem.last_used_submission);
-
+    pub unsafe fn acquire_next_image_raw(&mut self, frame_index: usize) -> Option<SurfaceImage> {
+        if let Some(i) = &self.current_image {
+            if i.frame_index == frame_index {
+                return Some(i.clone());
+            }
+        }
         let res = unsafe {
-            self.swapchain
-                .device
-                .acquire_next_image(self.swapchain.raw, u64::MAX, acquire_sem.acquire, self.fence)
+            self.swapchain.device.acquire_next_image(self.swapchain.raw, u64::MAX, self.acquire_semaphores[frame_index], vk::Fence::null())
         };
-        drop(acquire_sem);
-
         match res {
             Ok((index, _)) => {
-                unsafe {
-                    self.device.raw.wait_for_fences(&[self.fence], true, u64::MAX).unwrap();
-                    self.device.raw.reset_fences(&[self.fence]).unwrap();
-                }
-
                 let image = SurfaceImage {
-                    image: self.swapchain.images[index as usize].clone(),
+                    inner: self.swapchain.images[index as usize].clone(),
                     index,
-                    acquire: self.acquire_semaphores[self.acquire_index as usize].clone(),
-                    present: self.present_semaphores[index as usize].clone(),
+                    frame_index,
                 };
-
-                {
-                    let mut cmd = self.device.new_command_buffer();
-                    cmd.image_barrier_raw(image.image.raw, image.image.aspect, vk::ImageLayout::PRESENT_SRC_KHR, image.image.optimal_layout);
-                    self.device.submit([cmd], Some(&image));
-                }
-
-                self.acquire_index = (self.acquire_index + 1) % self.acquire_semaphores.len();
-                image
+                self.current_image = Some(image);
+                self.current_image.clone()
             }
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::ERROR_SURFACE_LOST_KHR) | Err(vk::Result::NOT_READY) => {
-                log::error!("Failed to acquire next image: {:?}, recreating swapchain", res);
-                self.recreate_swapchain();
-                self.acquire()
-            }
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::ERROR_SURFACE_LOST_KHR) | Err(vk::Result::NOT_READY) => None,
             Err(e) => panic!("Failed to acquire next image: {:?}", e),
         }
     }
 
-    pub fn present(&mut self, image: &SurfaceImage) -> bool {
-        {
-            // Transition image to PRESENT_SRC_KHR for presentation.
-            let mut cmd = self.device.new_command_buffer();
-            cmd.image_barrier_raw(image.image.raw, image.image.aspect, image.image.optimal_layout, vk::ImageLayout::PRESENT_SRC_KHR);
-            self.device.submit([cmd], Some(&image));
-        }
-        let mut present_sem = image.present.lock();
-        let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(present_sem.get_waits())
-            .swapchains(slice::from_ref(&self.swapchain.raw))
-            .image_indices(slice::from_ref(&image.index));
+    pub fn get_current_image(&self) -> Option<SurfaceImage> {
+        self.current_image.clone()
+    }
 
-        let _idx = self.device.submit_mutex.lock();
-        let res = unsafe { self.swapchain.device.queue_present(self.device.present_queue, &present_info) };
-        drop(_idx);
-
-        match res {
-            Ok(suboptimal) => {
-                present_sem.count = 0;
-                image.acquire.lock().should_wait = true;
-                suboptimal
+    pub fn present(&mut self) -> bool {
+        let image_index = match self.current_image.take() {
+            Some(i) => i.index,
+            None => {
+                log::error!("No image acquired for presentation!");
+                return false;
             }
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::ERROR_SURFACE_LOST_KHR) | Err(vk::Result::ERROR_NATIVE_WINDOW_IN_USE_KHR) => {
+        };
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(slice::from_ref(&self.present_semaphores[image_index as usize]))
+            .swapchains(slice::from_ref(&self.swapchain.raw))
+            .image_indices(slice::from_ref(&image_index));
+        let res = unsafe { self.swapchain.device.queue_present(self.device.present_queue, &present_info) };
+        match res {
+            Ok(suboptimal) => suboptimal,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::ERROR_NATIVE_WINDOW_IN_USE_KHR) => {
                 log::error!("Presentation failed with {:?}, recreating swapchain", res);
                 self.recreate_swapchain();
                 false
@@ -169,33 +112,20 @@ impl Surface {
 
     pub fn recreate_swapchain(&mut self) {
         self.device.wait_idle();
+        self.device.reset_frames();
 
-        self.acquire_semaphores
-            .drain(..)
-            .for_each(|s| unsafe { self.device.raw.destroy_semaphore(s.lock().acquire, None) });
-        self.present_semaphores
-            .drain(..)
-            .for_each(|s| s.lock().present.iter().for_each(|x| unsafe { self.device.raw.destroy_semaphore(*x, None) }));
+        self.current_image = None;
+        self.acquire_semaphores.drain(..).for_each(|s| unsafe { self.device.raw.destroy_semaphore(s, None) });
+        self.present_semaphores.drain(..).for_each(|s| unsafe { self.device.raw.destroy_semaphore(s, None) });
 
         let old_swapchain = self.swapchain.raw;
         self.swapchain = make_swapchain(&self.device, self.raw, self.config, Some(old_swapchain)).expect("Failed to recreate swapchain");
 
-        self.acquire_semaphores = (0..self.swapchain.images.len())
-            .map(|_| unsafe {
-                let acquire = self.device.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap();
-                AcquireSemaphore {
-                    acquire,
-                    should_wait: true,
-                    last_used_submission: 0,
-                }
-            })
-            .map(Mutex::new)
-            .map(Arc::new)
+        self.acquire_semaphores = (0..self.device.n_frames())
+            .map(|_| unsafe { self.device.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() })
             .collect_vec();
         self.present_semaphores = (0..self.swapchain.images.len())
-            .map(|_| PresentSemaphores { present: Vec::new(), count: 0 })
-            .map(Mutex::new)
-            .map(Arc::new)
+            .map(|_| unsafe { self.device.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() })
             .collect_vec();
         unsafe {
             self.device.raw.reset_fences(&[self.fence]).unwrap();
@@ -210,12 +140,10 @@ impl Drop for Surface {
             self.device.raw.destroy_fence(self.fence, None);
 
             for sem in &self.acquire_semaphores {
-                self.device.raw.destroy_semaphore(sem.lock().acquire, None);
+                self.device.raw.destroy_semaphore(*sem, None);
             }
-            for sems in &self.present_semaphores {
-                sems.lock().present.iter().for_each(|x| {
-                    self.device.raw.destroy_semaphore(*x, None);
-                });
+            for sem in &self.present_semaphores {
+                self.device.raw.destroy_semaphore(*sem, None);
             }
             self.swapchain.device.destroy_swapchain(self.swapchain.raw, None);
             self.instance.destroy_surface(self.raw, None);
@@ -233,22 +161,11 @@ impl RenderingDevice {
         let surface = unsafe { ash_window::create_surface(&self.shared.entry, &self.shared.instance, rdh, rwh, None).expect("Failed to create surface") };
         let swapchain = make_swapchain(&self, surface, config, None).expect("Failed to create swapchain");
 
-        let acquire_semaphores = (0..swapchain.images.len())
-            .map(|_| unsafe {
-                let acquire = self.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap();
-                AcquireSemaphore {
-                    acquire,
-                    should_wait: true,
-                    last_used_submission: 0,
-                }
-            })
-            .map(Mutex::new)
-            .map(Arc::new)
+        let acquire_semaphores = (0..self.n_frames())
+            .map(|_| unsafe { self.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() })
             .collect_vec();
         let present_semaphores = (0..swapchain.images.len())
-            .map(|_| PresentSemaphores { present: Vec::new(), count: 0 })
-            .map(Mutex::new)
-            .map(Arc::new)
+            .map(|_| unsafe { self.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None).unwrap() })
             .collect_vec();
         let fence = unsafe { self.raw.create_fence(&vk::FenceCreateInfo::default(), None).unwrap() };
 
@@ -261,7 +178,7 @@ impl RenderingDevice {
 
             acquire_semaphores,
             present_semaphores,
-            acquire_index: 0,
+            current_image: None,
             fence,
         }
     }
@@ -326,9 +243,9 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
             },
         };
         log::info!("Creating swapchain:");
-        log::info!("Available present modes: {}", present_modes.iter().map(|&m| format!("{:?}", m)).join(","));
+        log::info!("Available present modes: {:?}", present_modes);
         log::info!("Selected present mode: {:?}", present_mode);
-        log::info!("Surface Format: {:?}", format);
+        log::info!("Surface Format: {:?} {:?}", format, color_space);
         log::info!("Framebuffer Size: {}x{}", extent.width, extent.height);
 
         let swapchain = device.create_swapchain(
@@ -342,7 +259,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
                 .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform)
-                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE) // TODO: Support other composite alpha modes
                 .present_mode(present_mode)
                 .clipped(true)
                 .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null())),
@@ -356,26 +273,16 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
             .get_swapchain_images(swapchain)?
             .iter()
             .map(|&image| {
-                let img = rd.new_image_raw(
-                    image,
-                    format,
-                    extent.as_extent3d(1),
-                    vk::SampleCountFlags::TYPE_1,
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
-                    None,
-                );
+                let img = rd.new_image_raw(image, format, extent.as_extent3d(1), vk::SampleCountFlags::TYPE_1, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC, None);
                 img
             })
             .collect_vec();
 
-        {
-            let mut cmd = rd.new_command_buffer();
-            for image in &images {
-                cmd.image_barrier_raw(image.raw, image.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::PRESENT_SRC_KHR);
+        rd.record(|encoder| {
+            for img in images.iter() {
+                encoder.image_barrier_raw(img.raw, img.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::PRESENT_SRC_KHR);
             }
-            rd.submit([cmd], None);
-        }
-
+        });
         Ok(Swapchain {
             raw: swapchain,
             device,
