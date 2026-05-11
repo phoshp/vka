@@ -132,7 +132,11 @@ impl ImageView {
     }
 
     pub fn descriptor(&self) -> vk::DescriptorImageInfo {
-        vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: self.raw, image_layout: vk::ImageLayout::GENERAL }
+        vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: self.raw,
+            image_layout: find_optimal_image_layout(self.image().unwrap().usage)
+        }
     }
 }
 
@@ -156,7 +160,6 @@ pub fn find_optimal_layout(usage: vk::ImageUsageFlags) -> vk::ImageLayout {
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
     }
 }
-
 
 impl RenderingDevice {
     /// Creates an image based on the provided description, allocating memory and binding it.

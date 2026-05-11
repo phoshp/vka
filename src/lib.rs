@@ -45,6 +45,22 @@ pub fn next_resource_id() -> u64 {
     RES_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+pub fn all_of(flags: &[bool]) -> bool {
+    flags.iter().all(|&f| f)
+}
+
+pub fn none_of(flags: &[bool]) -> bool {
+    flags.iter().all(|&f| !f)
+}
+
+pub fn any_of(flags: &[bool]) -> bool {
+    flags.iter().any(|&f| f)
+}
+
+pub fn one_of(flags: &[bool]) -> bool {
+    flags.iter().filter(|&&f| f).count() == 1
+}
+
 pub struct RenderingDeviceDesc<'a> {
     pub app_name: &'a CStr,
     pub gpu_validation: bool,

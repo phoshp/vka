@@ -38,7 +38,7 @@ pub fn main() {
                 samples: 1,
                 usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 ops: Operations::Color {
-                    load: LoadOp::Discard,
+                    load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Store,
                 },
             },

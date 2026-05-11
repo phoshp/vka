@@ -35,8 +35,22 @@ impl Default for QueueFamilies {
 struct DeviceExtensions {
     pub debug_utils: Option<DebugUtils>,
     pub mesh_shader: Option<ash::ext::mesh_shader::Device>,
+    pub ray_tracing_pipeline: Option<ash::khr::ray_tracing_pipeline::Device>,
     pub acceleration_structure: Option<ash::khr::acceleration_structure::Device>,
     pub buffer_device_address: Option<ash::khr::buffer_device_address::Device>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Features {
+    pub core10: vk::PhysicalDeviceFeatures,
+    pub core11: vk::PhysicalDeviceVulkan11Features<'static>,
+    pub core12: vk::PhysicalDeviceVulkan12Features<'static>,
+    pub core13: vk::PhysicalDeviceVulkan13Features<'static>,
+
+    pub mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT<'static>,
+    pub ray_tracing_pipeline: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'static>,
+    pub ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR<'static>,
+    pub acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static>,
 }
 
 pub struct SharedDevice {
@@ -65,10 +79,7 @@ pub struct RenderingDeviceImpl {
     pub properties: vk::PhysicalDeviceProperties,
     pub mem_properties: vk::PhysicalDeviceMemoryProperties,
 
-    pub features: vk::PhysicalDeviceFeatures,
-    pub features11: vk::PhysicalDeviceVulkan11Features<'static>,
-    pub features12: vk::PhysicalDeviceVulkan12Features<'static>,
-    pub features13: vk::PhysicalDeviceVulkan13Features<'static>,
+    pub features: Features,
 
     pub enabled_extensions: Vec<&'static CStr>,
     pub enabled_layers: Vec<&'static CStr>,
@@ -212,15 +223,26 @@ impl RenderingDevice {
                 }
             }
 
-            let mut features = vk::PhysicalDeviceFeatures2::default();
+            let mut features10 = vk::PhysicalDeviceFeatures2::default();
             let mut features11 = vk::PhysicalDeviceVulkan11Features::default();
             let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
             let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
 
-            features = features.push_next(&mut features11).push_next(&mut features12).push_next(&mut features13);
-            instance.get_physical_device_features2(phy_device, &mut features);
+            let mut features_mesh_shader = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+            let mut features_ray_tracing_pipeline = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
+            let mut features_ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+            let mut features_acceleration_structure = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
 
-            features.features.robust_buffer_access &= desc.gpu_validation as u32;
+            features10 = features10
+                .push_next(&mut features11)
+                .push_next(&mut features12)
+                .push_next(&mut features13)
+                .push_next(&mut features_mesh_shader)
+                .push_next(&mut features_ray_tracing_pipeline)
+                .push_next(&mut features_ray_query)
+                .push_next(&mut features_acceleration_structure);
+            instance.get_physical_device_features2(phy_device, &mut features10);
+            features10.features.robust_buffer_access &= desc.gpu_validation as u32;
 
             let surface = if let Some((rdh, rwh)) = desc.surface {
                 enabled_device_exts.push(vk::KHR_SWAPCHAIN_NAME);
@@ -255,7 +277,6 @@ impl RenderingDevice {
                 log::warn!("No present queue found, falling back to graphics queue");
             }
 
-            let features10 = features.features;
             log::info!("Creating logical device");
             log::info!("Picked device: {:?}[{:?}]", properties.device_name_as_c_str().unwrap(), properties.device_type);
             log::info!("Enabled Extensions: {}", &enabled_device_exts.iter().map(|x| x.to_str().unwrap()).join(","));
@@ -271,7 +292,7 @@ impl RenderingDevice {
                 &vk::DeviceCreateInfo::default()
                     .enabled_extension_names(&enabled_device_exts.iter().map(|x| x.as_ptr()).collect_vec())
                     .queue_create_infos(&queue_create_infos)
-                    .push_next(&mut features),
+                    .push_next(&mut features10),
                 None,
             )?;
             let mem_properties = instance.get_physical_device_memory_properties(phy_device);
@@ -283,6 +304,31 @@ impl RenderingDevice {
 
             let main_queue = device.get_device_queue(queue_families.graphics, 0);
             let present_queue = device.get_device_queue(queue_families.present, 0);
+
+            let mut features = Features::default();
+            features.core10 = features10.features;
+            features.core11 = features11;
+            features.core12 = features12;
+            features.core13 = features13;
+            features.mesh_shader = features_mesh_shader;
+            features.ray_tracing_pipeline = features_ray_tracing_pipeline;
+            features.ray_query = features_ray_query;
+            features.acceleration_structure = features_acceleration_structure;
+
+            let extensions = DeviceExtensions {
+                debug_utils,
+                mesh_shader: enabled_device_exts
+                    .contains(&ash::ext::mesh_shader::NAME)
+                    .then(|| ash::ext::mesh_shader::Device::new(&instance, &device)),
+                ray_tracing_pipeline: enabled_device_exts
+                    .contains(&ash::khr::ray_tracing_pipeline::NAME)
+                    .then(|| ash::khr::ray_tracing_pipeline::Device::new(&instance, &device)),
+                acceleration_structure: enabled_device_exts
+                    .contains(&ash::khr::acceleration_structure::NAME)
+                    .then(|| ash::khr::acceleration_structure::Device::new(&instance, &device)),
+                buffer_device_address: (features.core12.buffer_device_address == 1).then(|| ash::khr::buffer_device_address::Device::new(&instance, &device)),
+            };
+
             // TODO: more on that later
             let allocator = StdMutex::new(
                 Allocator::new(&AllocatorCreateDesc {
@@ -295,16 +341,6 @@ impl RenderingDevice {
                 })
                 .unwrap(),
             );
-            let extensions = DeviceExtensions {
-                debug_utils,
-                mesh_shader: enabled_device_exts
-                    .contains(&ash::ext::mesh_shader::NAME)
-                    .then(|| ash::ext::mesh_shader::Device::new(&instance, &device)),
-                acceleration_structure: enabled_device_exts
-                    .contains(&ash::khr::acceleration_structure::NAME)
-                    .then(|| ash::khr::acceleration_structure::Device::new(&instance, &device)),
-                buffer_device_address: (features12.buffer_device_address == 1).then(|| ash::khr::buffer_device_address::Device::new(&instance, &device)),
-            };
 
             let shared = Arc::new(SharedDevice {
                 raw: device.clone(),
@@ -345,10 +381,7 @@ impl RenderingDevice {
                 phy_device,
                 properties,
                 mem_properties,
-                features: features10,
-                features11,
-                features12,
-                features13,
+                features,
 
                 enabled_extensions: enabled_device_exts,
                 enabled_layers,
