@@ -120,7 +120,7 @@ impl RenderingDevice {
                         stencil_store,
                     } => (conv_load_op(&load), conv_store_op(&store), conv_load_op(&stencil_load), conv_store_op(&stencil_store)),
                 };
-                let layout = crate::find_optimal_layout(a.usage);
+                let layout = crate::find_optimal_image_layout(a.usage);
                 vk::AttachmentDescription::default()
                     .format(a.format)
                     .samples(vk::SampleCountFlags::from_raw(a.samples))
