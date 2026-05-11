@@ -41,6 +41,7 @@ pub struct Surface {
 
     pub acquire_semaphores: Vec<vk::Semaphore>,
     pub present_semaphores: Vec<vk::Semaphore>,
+    pub current_image: Option<SurfaceImage>,
     pub fence: vk::Fence,
 }
 
@@ -48,10 +49,16 @@ pub struct Surface {
 pub struct SurfaceImage {
     pub inner: Image,
     pub index: u32,
+    pub frame_index: usize,
 }
 
 impl Surface {
     pub unsafe fn acquire_next_image_raw(&mut self, frame_index: usize) -> Option<SurfaceImage> {
+        if let Some(i) = &self.current_image {
+            if i.frame_index == frame_index {
+                return Some(i.clone());
+            }
+        }
         let res = unsafe {
             self.swapchain.device.acquire_next_image(self.swapchain.raw, u64::MAX, self.acquire_semaphores[frame_index], vk::Fence::null())
         };
@@ -60,23 +67,32 @@ impl Surface {
                 let image = SurfaceImage {
                     inner: self.swapchain.images[index as usize].clone(),
                     index,
+                    frame_index,
                 };
-                Some(image)
+                self.current_image = Some(image);
+                self.current_image.clone()
             }
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::ERROR_SURFACE_LOST_KHR) | Err(vk::Result::NOT_READY) => {
-                log::error!("Failed to acquire next image: {:?}, recreating swapchain", res);
-                self.recreate_swapchain();
-                None
-            }
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::ERROR_SURFACE_LOST_KHR) | Err(vk::Result::NOT_READY) => None,
             Err(e) => panic!("Failed to acquire next image: {:?}", e),
         }
     }
 
-    pub fn present(&mut self, image: &SurfaceImage) -> bool {
+    pub fn get_current_image(&self) -> Option<SurfaceImage> {
+        self.current_image.clone()
+    }
+
+    pub fn present(&mut self) -> bool {
+        let image_index = match self.current_image.take() {
+            Some(i) => i.index,
+            None => {
+                log::error!("No image acquired for presentation!");
+                return false;
+            }
+        };
         let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(slice::from_ref(&self.present_semaphores[image.index as usize]))
+            .wait_semaphores(slice::from_ref(&self.present_semaphores[image_index as usize]))
             .swapchains(slice::from_ref(&self.swapchain.raw))
-            .image_indices(slice::from_ref(&image.index));
+            .image_indices(slice::from_ref(&image_index));
         let res = unsafe { self.swapchain.device.queue_present(self.device.present_queue, &present_info) };
         match res {
             Ok(suboptimal) => suboptimal,
@@ -98,6 +114,7 @@ impl Surface {
         self.device.wait_idle();
         self.device.reset_frames();
 
+        self.current_image = None;
         self.acquire_semaphores.drain(..).for_each(|s| unsafe { self.device.raw.destroy_semaphore(s, None) });
         self.present_semaphores.drain(..).for_each(|s| unsafe { self.device.raw.destroy_semaphore(s, None) });
 
@@ -161,6 +178,7 @@ impl RenderingDevice {
 
             acquire_semaphores,
             present_semaphores,
+            current_image: None,
             fence,
         }
     }

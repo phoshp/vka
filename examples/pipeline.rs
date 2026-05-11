@@ -139,7 +139,7 @@ pub fn main() {
         winit::event::Event::WindowEvent { event, .. } => match event {
             winit::event::WindowEvent::RedrawRequested => {
                 let extent = surface.swapchain.extent;
-                let present = rd.record_frame(&mut surface, |cmd, image| {
+                rd.record_frame(&mut surface, |cmd, image| {
                     let views = [color_image.full_view(), image.inner.full_view()];
                     cmd.begin_render_pass(
                         &rpass,
@@ -173,7 +173,7 @@ pub fn main() {
                     cmd.end_render_pass();
                 });
                 rd.submit();
-                present.map(|i| surface.present(&i));
+                surface.present();
 
                 frame_count += 1;
                 let elapsed = fps_timer.elapsed();

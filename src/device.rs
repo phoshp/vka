@@ -4,6 +4,7 @@ use ash::vk;
 use ash::{ext::debug_utils, prelude::VkResult};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use itertools::Itertools;
+use parking_lot::lock_api::RawMutex;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -77,6 +78,8 @@ pub struct RenderingDeviceImpl {
     pub queue_families: QueueFamilies,
     pub main_queue: vk::Queue,
     pub present_queue: vk::Queue,
+
+    pub device_mutex: parking_lot::RawMutex,
 
     staging_belt: Mutex<StagingBelt>,
     pub frames: Vec<Mutex<Frame>>,
@@ -363,6 +366,8 @@ impl RenderingDevice {
                 main_queue,
                 present_queue,
 
+                device_mutex: RawMutex::INIT,
+
                 staging_belt: Mutex::new(StagingBelt::new(4 * 1024 * 1024)),
                 frames,
                 frame_counter,
@@ -398,7 +403,7 @@ impl RenderingDevice {
         }
     }
 
-    pub fn wait_flush_frame(&self, frame: &mut Frame) {
+    pub fn wait_internal_frame(&self, frame: &mut Frame) {
         if frame.state == FrameState::Pending {
             unsafe {
                 self.raw.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
@@ -412,10 +417,10 @@ impl RenderingDevice {
         }
     }
 
-    pub fn record_frame(&self, surface: &mut Surface, record_fn: impl FnOnce(&mut CommandEncoder, SurfaceImage)) -> Option<SurfaceImage> {
+    pub fn record_frame(&self, surface: &mut Surface, record_fn: impl FnOnce(&mut CommandEncoder, SurfaceImage)) {
         let frame_idx = self.frame_counter.read();
         let mut frame = self.frames[frame_idx.1].lock();
-        self.wait_flush_frame(&mut frame);
+        self.wait_internal_frame(&mut frame);
 
         if let Some(image) = unsafe { surface.acquire_next_image_raw(frame_idx.1) } {
             frame.wait_semaphore = Some(surface.acquire_semaphores[frame_idx.1]);
@@ -439,16 +444,18 @@ impl RenderingDevice {
             let mut frame = self.frames[frame_idx.1].lock();
             frame.all_cmd_buffers.push(cmd);
             frame.encoders.push(encoder);
-            Some(image)
         } else {
-            None
+            drop(frame);
+            drop(frame_idx);
+            log::error!("Failed to acquire next image, recreating swapchain");
+            surface.recreate_swapchain();
         }
     }
 
     pub fn record(&self, record_fn: impl FnOnce(&mut CommandEncoder)) {
         let frame_idx = self.frame_counter.read();
         let mut frame = self.frames[frame_idx.1].lock();
-        self.wait_flush_frame(&mut frame);
+        self.wait_internal_frame(&mut frame);
 
         let mut encoder = self.pick_encoder(&mut frame);
         drop(frame);
@@ -478,7 +485,7 @@ impl RenderingDevice {
         let mut frame_idx = self.frame_counter.write();
         let mut frame = self.frames[frame_idx.1].lock();
 
-        self.wait_flush_frame(&mut frame);
+        self.wait_internal_frame(&mut frame);
         let completed_submission = frame_idx.0.saturating_sub(self.frames.len() as u64);
         self.staging_belt.lock().maintain(completed_submission);
         frame.state = FrameState::Pending;
@@ -505,13 +512,23 @@ impl RenderingDevice {
             .signal_semaphores(&signal_semaphores[..signal_count]);
 
         unsafe {
+            self.device_mutex.lock();
             self.raw.reset_fences(&[frame.fence]).unwrap();
             self.raw.queue_submit(self.main_queue, &[submit_info], frame.fence).unwrap();
+            self.device_mutex.unlock();
         }
         let prev_frame_num = frame_idx.0;
         frame_idx.0 += 1;
         frame_idx.1 = frame_idx.0 as usize % self.frames.len();
         prev_frame_num
+    }
+
+    pub fn wait_for(&self, frame_num: u64) {
+        let frame_idx = self.frame_counter.read();
+        if frame_num >= frame_idx.0.saturating_sub(self.n_frames() as u64) {
+            let target = frame_num % self.frames.len() as u64;
+            self.wait_internal_frame(&mut self.frames[target as usize].lock());
+        }
     }
 
     /// Blocks until the main queue goes idle.
