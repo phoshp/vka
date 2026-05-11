@@ -20,6 +20,7 @@ pub struct CommandEncoder {
 
     active: vk::CommandBuffer,
     bind_point: vk::PipelineBindPoint,
+    render_pass_views: Vec<(ImageView, vk::ImageLayout)>,
 }
 
 impl Drop for CommandEncoder {
@@ -56,8 +57,10 @@ impl CommandEncoder {
             pool,
             free,
             device: device.clone(),
+
             active: vk::CommandBuffer::null(),
             bind_point: BIND_POINT_NONE,
+            render_pass_views: Vec::new(),
         })
     }
 
@@ -166,6 +169,14 @@ impl CommandEncoder {
                 .unwrap()
         });
 
+        self.render_pass_views.clear();
+        for (i, view) in views.iter().enumerate() {
+            let img = view.image().expect("ImageView must have a valid image");
+            if img.optimal_layout != rpass.layouts[i] {
+                self.image_barrier_raw(img.raw, img.aspect, img.optimal_layout, rpass.layouts[i]);
+            }
+            self.render_pass_views.push(((*view).clone(), rpass.layouts[i]));
+        }
         self.bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
             self.device.cmd_begin_render_pass(
@@ -286,6 +297,12 @@ impl CommandEncoder {
         unsafe {
             self.device.cmd_end_render_pass(self.active);
         }
+        for (view, layout) in self.render_pass_views.iter() {
+            let img = view.image().expect("ImageView must have a valid image");
+            if img.optimal_layout != *layout {
+                self.image_barrier_raw(img.raw, img.aspect, *layout, img.optimal_layout);
+            }
+        }
     }
 
     pub fn end_rendering(&mut self) {
@@ -346,7 +363,7 @@ impl CommandEncoder {
 
 /// Memory Barriers
 impl CommandEncoder {
-    pub fn barrier(&mut self, src_stages: vk::PipelineStageFlags, dst_stages: vk::PipelineStageFlags) {
+    pub fn barrier(&self, src_stages: vk::PipelineStageFlags, dst_stages: vk::PipelineStageFlags) {
         unsafe {
             let barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
@@ -356,7 +373,7 @@ impl CommandEncoder {
         }
     }
 
-    pub fn image_barrier_raw(&mut self, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
+    pub fn image_barrier_raw(&self, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
         self.check_bind_point(&[vk::PipelineBindPoint::COMPUTE, BIND_POINT_NONE]);
         unsafe {
             if new_layout == vk::ImageLayout::UNDEFINED || new_layout == vk::ImageLayout::PREINITIALIZED {

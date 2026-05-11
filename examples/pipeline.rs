@@ -27,7 +27,7 @@ pub fn main() {
             Attachment {
                 format: color_image.format,
                 samples: color_image.samples.as_raw(),
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 ops: Operations::Color {
                     load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 0.5)),
                     store: StoreOp::Discard,
@@ -36,7 +36,7 @@ pub fn main() {
             Attachment {
                 format: vk::Format::B8G8R8A8_UNORM,
                 samples: 1,
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 ops: Operations::Color {
                     load: LoadOp::Clear(vka::color32(0.0, 1.0, 1.0, 1.0)),
                     store: StoreOp::Store,
