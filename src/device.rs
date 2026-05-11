@@ -479,6 +479,9 @@ impl RenderingDevice {
         let mut frame = self.frames[frame_idx.1].lock();
 
         self.wait_internal_frame(&mut frame);
+        if frame.all_cmd_buffers.is_empty() {
+            return frame_idx.0;
+        }
         for encoder in frame.encoders.iter_mut() {
             encoder.pending = true;
         }
