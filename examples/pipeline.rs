@@ -133,6 +133,8 @@ pub fn main() {
     let mut frame_count = 0;
     let mut fps = 0.0;
 
+    let buffer = rd.new_buffer(&BufferDesc::uniform(4 * 1024));
+
     let mut surface = rd.new_surface(&window, vka::SurfaceConfig::default());
 
     event_loop.run(|event, event_loop| match event {
@@ -171,9 +173,13 @@ pub fn main() {
                     cmd.bind_vertex_buffers(0, &[vertex_buf.raw], &[0]);
                     cmd.draw(3, 1, 0, 0);
                     cmd.end_render_pass();
+
+                    // let mut data = [0u8; 4];
+                    // rd.read_buffer(&buffer, &mut data, 0); // we can submit mid-frame
                 });
                 rd.submit();
                 surface.present();
+                rd.advance_frame();
 
                 frame_count += 1;
                 let elapsed = fps_timer.elapsed();

@@ -89,6 +89,7 @@ pub struct RenderingDeviceImpl {
 pub struct EncoderInFlight {
     pub inner: Box<CommandEncoder>,
     pub cmd_buffers: Vec<vk::CommandBuffer>,
+    pub pending: bool,
 }
 
 pub struct Frame {
@@ -100,13 +101,6 @@ pub struct Frame {
     pub post_encoder: EncoderInFlight,
 
     pub fence: vk::Fence,
-    pub state: FrameState,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum FrameState {
-    Recording,
-    Pending,
 }
 
 /// A reference-counted wrapper around `RenderingDeviceImpl`, providing convenient access to Vulkan operations.
@@ -328,6 +322,7 @@ impl RenderingDevice {
                     let post_encoder = EncoderInFlight {
                         inner: Box::new(CommandEncoder::new(&device, queue_families.graphics).unwrap()),
                         cmd_buffers: Vec::new(),
+                        pending: false,
                     };
                     Mutex::new(Frame {
                         wait_semaphore: None,
@@ -339,7 +334,6 @@ impl RenderingDevice {
                         fence: device
                             .create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)
                             .expect("Failed to create frame fence"),
-                        state: FrameState::Pending,
                     })
                 })
                 .collect_vec();
@@ -395,25 +389,24 @@ impl RenderingDevice {
             for mut encoder in frame.encoders.drain(..) {
                 encoder.inner.reset(&encoder.cmd_buffers);
                 encoder.cmd_buffers.clear();
+                encoder.pending = false;
             }
             frame.all_cmd_buffers.clear();
             frame.wait_semaphore = None;
             frame.signal_semaphore = None;
-            frame.state = FrameState::Pending;
         }
     }
 
     pub fn wait_internal_frame(&self, frame: &mut Frame) {
-        if frame.state == FrameState::Pending {
-            unsafe {
-                self.raw.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
-            }
-            for encoder in frame.encoders.iter_mut() {
+        unsafe {
+            self.raw.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
+        }
+        for encoder in frame.encoders.iter_mut() {
+            if encoder.pending {
                 encoder.inner.reset(&encoder.cmd_buffers);
                 encoder.cmd_buffers.clear();
+                encoder.pending = false;
             }
-            frame.all_cmd_buffers.clear();
-            frame.state = FrameState::Recording;
         }
     }
 
@@ -424,7 +417,6 @@ impl RenderingDevice {
 
         if let Some(image) = unsafe { surface.acquire_next_image_raw(frame_idx.1) } {
             frame.wait_semaphore = Some(surface.acquire_semaphores[frame_idx.1]);
-            frame.signal_semaphore = Some(surface.present_semaphores[image.index as usize]);
 
             let mut encoder = self.pick_encoder(&mut frame);
             drop(frame);
@@ -442,6 +434,7 @@ impl RenderingDevice {
             encoder.cmd_buffers.push(cmd);
 
             let mut frame = self.frames[frame_idx.1].lock();
+            frame.signal_semaphore = Some(surface.present_semaphores[image.index as usize]);
             frame.all_cmd_buffers.push(cmd);
             frame.encoders.push(encoder);
         } else {
@@ -476,19 +469,19 @@ impl RenderingDevice {
             None => {
                 log::info!("Creating new encoder");
                 let inner = Box::new(CommandEncoder::new(&self.raw, self.queue_families.graphics).unwrap());
-                EncoderInFlight { inner, cmd_buffers: Vec::new() }
+                EncoderInFlight { inner, cmd_buffers: Vec::new(), pending: false }
             }
         }
     }
 
     pub fn submit(&self) -> u64 {
-        let mut frame_idx = self.frame_counter.write();
+        let frame_idx = self.frame_counter.read();
         let mut frame = self.frames[frame_idx.1].lock();
 
         self.wait_internal_frame(&mut frame);
-        let completed_submission = frame_idx.0.saturating_sub(self.frames.len() as u64);
-        self.staging_belt.lock().maintain(completed_submission);
-        frame.state = FrameState::Pending;
+        for encoder in frame.encoders.iter_mut() {
+            encoder.pending = true;
+        }
 
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let mut wait_semaphores = [vk::Semaphore::null()];
@@ -517,10 +510,17 @@ impl RenderingDevice {
             self.raw.queue_submit(self.main_queue, &[submit_info], frame.fence).unwrap();
             self.device_mutex.unlock();
         }
-        let prev_frame_num = frame_idx.0;
+        frame.all_cmd_buffers.clear();
+        frame_idx.0
+    }
+
+    pub fn advance_frame(&self) {
+        let mut frame_idx = self.frame_counter.write();
+        let completed_submission = frame_idx.0.saturating_sub(self.frames.len() as u64);
+        self.staging_belt.lock().maintain(completed_submission);
+
         frame_idx.0 += 1;
         frame_idx.1 = frame_idx.0 as usize % self.frames.len();
-        prev_frame_num
     }
 
     pub fn wait_for(&self, frame_num: u64) {
