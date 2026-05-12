@@ -472,7 +472,7 @@ impl RenderingDevice {
     }
 
     pub fn record(&self, record_fn: impl FnOnce(&mut CommandEncoder)) {
-        let frame_idx = self.frame_counter.read();
+        let frame_idx = self.frame_counter.read_recursive();
         let mut frame = self.frames[frame_idx.1].lock();
         self.wait_frame_fence(&mut frame);
 
