@@ -109,7 +109,6 @@ pub struct Frame {
 
     pub encoders: Vec<EncoderInFlight>,
     pub all_cmd_buffers: Vec<vk::CommandBuffer>,
-    pub post_encoder: EncoderInFlight,
 
     pub fence: vk::Fence,
 }
@@ -355,17 +354,11 @@ impl RenderingDevice {
 
             let frames = (0..desc.n_frames)
                 .map(|_| {
-                    let post_encoder = EncoderInFlight {
-                        inner: Box::new(CommandEncoder::new(&device, queue_families.graphics).unwrap()),
-                        cmd_buffers: Vec::new(),
-                        pending: false,
-                    };
                     Mutex::new(Frame {
                         wait_semaphore: None,
                         signal_semaphore: None,
                         encoders: Vec::new(),
                         all_cmd_buffers: Vec::new(),
-                        post_encoder,
 
                         fence: device
                             .create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)
