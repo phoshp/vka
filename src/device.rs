@@ -423,7 +423,7 @@ impl RenderingDevice {
         }
     }
 
-    pub fn wait_internal_frame(&self, frame: &mut Frame) {
+    pub fn wait_frame_fence(&self, frame: &mut Frame) {
         unsafe {
             self.raw.wait_for_fences(&[frame.fence], true, u64::MAX).unwrap();
         }
@@ -439,7 +439,7 @@ impl RenderingDevice {
     pub fn record_frame(&self, surface: &mut Surface, record_fn: impl FnOnce(&mut CommandEncoder, SurfaceImage)) {
         let frame_idx = self.frame_counter.read();
         let mut frame = self.frames[frame_idx.1].lock();
-        self.wait_internal_frame(&mut frame);
+        self.wait_frame_fence(&mut frame);
 
         if let Some(image) = unsafe { surface.acquire_next_image_raw(frame_idx.1) } {
             frame.wait_semaphore = Some(surface.acquire_semaphores[frame_idx.1]);
@@ -474,7 +474,7 @@ impl RenderingDevice {
     pub fn record(&self, record_fn: impl FnOnce(&mut CommandEncoder)) {
         let frame_idx = self.frame_counter.read();
         let mut frame = self.frames[frame_idx.1].lock();
-        self.wait_internal_frame(&mut frame);
+        self.wait_frame_fence(&mut frame);
 
         let mut encoder = self.pick_encoder(&mut frame);
         drop(frame);
@@ -504,7 +504,7 @@ impl RenderingDevice {
         let frame_idx = self.frame_counter.read();
         let mut frame = self.frames[frame_idx.1].lock();
 
-        self.wait_internal_frame(&mut frame);
+        self.wait_frame_fence(&mut frame);
         if frame.all_cmd_buffers.is_empty() {
             return frame_idx.0;
         }
@@ -556,7 +556,7 @@ impl RenderingDevice {
         let frame_idx = self.frame_counter.read();
         if frame_num >= frame_idx.0.saturating_sub(self.n_frames() as u64) {
             let target = frame_num % self.frames.len() as u64;
-            self.wait_internal_frame(&mut self.frames[target as usize].lock());
+            self.wait_frame_fence(&mut self.frames[target as usize].lock());
         }
     }
 
