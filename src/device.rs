@@ -602,9 +602,10 @@ impl RenderingDevice {
 
         let (staging_buffer, ptr) = self.staging_belt.lock().download(self, size);
 
-        self.record(|encoder| {
-            encoder.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
-            encoder.copy_image_to_buffer(
+        self.record(|cmd| {
+            cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            cmd.image_barrier_begin(image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            cmd.copy_image_to_buffer(
                 image,
                 &staging_buffer,
                 &[vk::BufferImageCopy::default()
@@ -616,7 +617,8 @@ impl RenderingDevice {
                     })
                     .image_subresource(subresource)],
             );
-            encoder.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
+            cmd.image_barrier_end(image);
+            cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
         });
         self.submit();
         self.wait_queue();
@@ -638,6 +640,7 @@ impl RenderingDevice {
         let (staging_buf, cursor, _) = self.staging_belt.lock().upload(self, crate::bytes_of(data));
         self.record(|cmd| {
             cmd.barrier(vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER);
+            cmd.image_barrier_begin(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             cmd.copy_buffer_to_image(
                 &staging_buf,
                 image,
@@ -647,6 +650,7 @@ impl RenderingDevice {
                     .image_offset(offset)
                     .image_extent(extent)],
             );
+            cmd.image_barrier_end(image);
             cmd.barrier(vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS);
         });
     }

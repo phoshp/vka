@@ -10,13 +10,13 @@ pub fn main() {
     let image = rd.new_image(&vka::ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 256, 256));
 
     rd.record(|cmd| {
-        cmd.image_barrier(&image, image.optimal_layout, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        cmd.image_barrier_begin(&image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         cmd.clear_color_image(
             &image,
             vk::ClearColorValue { float32: [1.0, 0.0, 0.0, 1.0] },
             &[image.full_range()],
         );
-        cmd.image_barrier(&image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, image.optimal_layout);
+        cmd.image_barrier_end(&image);
     });
     rd.submit();
 

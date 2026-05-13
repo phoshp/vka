@@ -21,6 +21,7 @@ pub struct CommandEncoder {
     active: vk::CommandBuffer,
     bind_point: vk::PipelineBindPoint,
     render_pass_views: Vec<(ImageView, vk::ImageLayout)>,
+    prev_image_layout: vk::ImageLayout,
 }
 
 impl Drop for CommandEncoder {
@@ -61,6 +62,7 @@ impl CommandEncoder {
             active: vk::CommandBuffer::null(),
             bind_point: BIND_POINT_NONE,
             render_pass_views: Vec::new(),
+            prev_image_layout: vk::ImageLayout::UNDEFINED,
         })
     }
 
@@ -375,6 +377,15 @@ impl CommandEncoder {
 
     pub fn image_barrier(&self, image: &Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
         self.image_barrier_raw(image.raw, image.aspect, old_layout, new_layout);
+    }
+
+    pub fn image_barrier_begin(&mut self, image: &Image, new_layout: vk::ImageLayout) {
+        self.image_barrier_raw(image.raw, image.aspect, image.optimal_layout, new_layout);
+        self.prev_image_layout = new_layout;
+    }
+
+    pub fn image_barrier_end(&mut self, image: &Image) {
+        self.image_barrier_raw(image.raw, image.aspect, self.prev_image_layout, image.optimal_layout);
     }
 
     pub fn image_barrier_raw(&self, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
