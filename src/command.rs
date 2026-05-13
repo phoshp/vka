@@ -373,6 +373,10 @@ impl CommandEncoder {
         }
     }
 
+    pub fn image_barrier(&self, image: &Image, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
+        self.image_barrier_raw(image.raw, image.aspect, old_layout, new_layout);
+    }
+
     pub fn image_barrier_raw(&self, image: vk::Image, aspect_mask: vk::ImageAspectFlags, old_layout: vk::ImageLayout, mut new_layout: vk::ImageLayout) {
         self.check_bind_point(&[vk::PipelineBindPoint::COMPUTE, BIND_POINT_NONE]);
         unsafe {

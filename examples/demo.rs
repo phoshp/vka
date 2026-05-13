@@ -9,13 +9,16 @@ pub fn main() {
     let buffer = rd.new_buffer(&vka::BufferDesc::uniform(4 * 1024));
     let image = rd.new_image(&vka::ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 256, 256));
 
-    let mut cmd = rd.new_command_buffer();
-    cmd.clear_color_image(
-        &image,
-        vk::ClearColorValue { float32: [1.0, 0.0, 0.0, 1.0] },
-        &[image.full_range()],
-    );
-    rd.submit([cmd.finish()], None);
+    rd.record(|cmd| {
+        cmd.image_barrier(&image, image.optimal_layout, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        cmd.clear_color_image(
+            &image,
+            vk::ClearColorValue { float32: [1.0, 0.0, 0.0, 1.0] },
+            &[image.full_range()],
+        );
+        cmd.image_barrier(&image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, image.optimal_layout);
+    });
+    rd.submit();
 
     rd.write_buffer(&buffer, &[1u8, 1u8, 1u8, 0u8, 0, 0], 0);
     rd.wait_queue();
