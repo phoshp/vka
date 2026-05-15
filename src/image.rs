@@ -135,7 +135,7 @@ impl ImageView {
         vk::DescriptorImageInfo {
             sampler: vk::Sampler::null(),
             image_view: self.raw,
-            image_layout: find_optimal_image_layout(self.image().unwrap().usage)
+            image_layout: self.image().unwrap().optimal_layout,
         }
     }
 }
