@@ -36,7 +36,7 @@ pub fn main() {
     rd.write_descriptors(&set, &[
         vka::WriteDescriptor::Buffer { binding: 0, array_element: 0, infos: &[buffer.descriptor(0, vk::WHOLE_SIZE)] },
         vka::WriteDescriptor::Image { binding: 1, array_element: 0, infos: &[image.full_view().descriptor()] },
-        vka::WriteDescriptor::Image { binding: 2, array_element: 0, infos: &[vk::DescriptorImageInfo::default().sampler(sampler.raw)] },
+        vka::WriteDescriptor::Image { binding: 2, array_element: 0, infos: &[sampler.descriptor()] },
     ]);
     // TODO: test descriptors in a pipeline.
 }

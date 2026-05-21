@@ -11,6 +11,12 @@ use crate::next_resource_id;
 #[repr(transparent)]
 pub struct Sampler(Arc<SamplerImpl>);
 
+impl Sampler {
+    pub fn descriptor(&self) -> vk::DescriptorImageInfo {
+        vk::DescriptorImageInfo::default().sampler(self.raw)
+    }
+}
+
 pub struct SamplerImpl {
     pub raw: vk::Sampler,
     pub id: u64,
