@@ -3,7 +3,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use ash::vk;
-use glam::vec4;
 
 pub use vka::*;
 use winit::dpi::PhysicalSize;
@@ -14,19 +13,18 @@ use winit::event_loop::EventLoop;
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::WindowAttributes;
 
-pub fn main() -> vka::Result<()> {
+pub fn main() {
     env_logger::init();
-    let event_loop = EventLoop::new()?;
-    let window = event_loop.create_window(WindowAttributes::default().with_inner_size(PhysicalSize::new(800, 600)))?;
-    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window).with_gpu_validation())?;
-    let color_image = rd.image_create(&ImageDesc::new_2d(vk::Format::R8G8B8A8_UNORM, 128, 128).usage(vk::ImageUsageFlags::COLOR_ATTACHMENT))?;
-    let rpass = rd.render_pass_create(&vka::RenderPassDesc {
+    let event_loop = EventLoop::new().unwrap();
+    let window = event_loop.create_window(WindowAttributes::default().with_inner_size(PhysicalSize::new(800, 600))).unwrap();
+    let rd = RenderingDevice::new(&RenderingDeviceDesc::with_window(&window).with_gpu_validation()).unwrap();
+    let rpass = rd.new_render_pass(&vka::RenderPassDesc {
         attachments: &[vka::Attachment {
             format: vk::Format::B8G8R8A8_UNORM,
             samples: 1,
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             ops: vka::Operations::Color {
-                load: vka::LoadOp::Clear(vec4(1.0, 1.0, 0.0, 1.0)),
+                load: vka::LoadOp::Clear(vka::color32(1.0, 1.0, 0.0, 1.0)),
                 store: vka::StoreOp::Store,
             },
         }],
@@ -41,25 +39,28 @@ pub fn main() -> vka::Result<()> {
     let mut frame_count = 0;
     let mut fps = 0.0;
 
+    let mut surface = rd.new_surface(&window, SurfaceConfig::default());
+
     event_loop.run(|event, event_loop| match event {
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::RedrawRequested => {
-                let frame = rd.acquire_swapchain_image().unwrap();
-                rd.record(|dev, cmd| {
-                    rd.begin_render_pass(
-                        cmd,
+                rd.record_frame(&mut surface, |cmd, image| {
+                    cmd.begin_render_pass(
                         &rpass,
-                        &[rd.image_full_view(&frame)],
+                        &[image.inner.full_view()],
                         vk::Rect2D {
                             offset: vk::Offset2D::default(),
-                            extent: rd.get_swapchain_extent(),
+                            extent: vk::Extent2D {
+                                width: image.inner.extent.width,
+                                height: image.inner.extent.height,
+                            },
                         },
                     );
-                    rd.end_render_pass(cmd, &rpass);
-                    rd.barrier_image(cmd, &frame, vk::ImageLayout::PRESENT_SRC_KHR);
+                    cmd.end_render_pass();
                 });
                 rd.submit();
-                rd.present();
+                surface.present();
+                rd.advance_frame();
 
                 frame_count += 1;
                 let elapsed = fps_timer.elapsed();
@@ -79,5 +80,4 @@ pub fn main() -> vka::Result<()> {
         },
         _ => (),
     });
-    Ok(())
 }
