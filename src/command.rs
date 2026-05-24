@@ -175,7 +175,7 @@ impl CommandEncoder {
         for (i, view) in views.iter().enumerate() {
             let img = view.image().expect("ImageView must have a valid image");
             if img.optimal_layout != rpass.layouts[i] {
-                self.image_barrier_raw(img.raw, img.aspect, img.optimal_layout, rpass.layouts[i]);
+                self.image_barrier(&img, img.optimal_layout, rpass.layouts[i]);
             }
             self.render_pass_views.push(((*view).clone(), rpass.layouts[i]));
         }
@@ -302,7 +302,7 @@ impl CommandEncoder {
         for (view, layout) in self.render_pass_views.iter() {
             let img = view.image().expect("ImageView must have a valid image");
             if img.optimal_layout != *layout {
-                self.image_barrier_raw(img.raw, img.aspect, *layout, img.optimal_layout);
+                self.image_barrier(&img, *layout, img.optimal_layout);
             }
         }
     }

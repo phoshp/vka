@@ -205,7 +205,7 @@ impl RenderingDevice {
             self.raw.bind_image_memory(image, alloc.memory(), alloc.offset()).expect("Failed to bind image memory");
             let res = self.new_image_raw(image, info.format, info.extent, info.samples, info.usage, Some(alloc));
             self.record(|encoder| {
-                encoder.image_barrier_raw(res.raw, res.aspect, vk::ImageLayout::UNDEFINED, res.optimal_layout);
+                encoder.image_barrier(&res, vk::ImageLayout::UNDEFINED, res.optimal_layout);
             });
             res
         }

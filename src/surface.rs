@@ -280,7 +280,7 @@ pub fn make_swapchain(rd: &RenderingDevice, surface: vk::SurfaceKHR, config: Sur
 
         rd.record(|encoder| {
             for img in images.iter() {
-                encoder.image_barrier_raw(img.raw, img.aspect, vk::ImageLayout::UNDEFINED, vk::ImageLayout::PRESENT_SRC_KHR);
+                encoder.image_barrier(img, vk::ImageLayout::UNDEFINED, vk::ImageLayout::PRESENT_SRC_KHR);
             }
         });
         Ok(Swapchain {
