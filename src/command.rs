@@ -22,6 +22,7 @@ pub struct CommandEncoder {
     bind_point: vk::PipelineBindPoint,
     render_pass_views: Vec<(ImageView, vk::ImageLayout)>,
     prev_image_layout: vk::ImageLayout,
+    hasher: DefaultHasher,
 }
 
 impl Drop for CommandEncoder {
@@ -63,6 +64,7 @@ impl CommandEncoder {
             bind_point: BIND_POINT_NONE,
             render_pass_views: Vec::new(),
             prev_image_layout: vk::ImageLayout::UNDEFINED,
+            hasher: DefaultHasher::new(),
         })
     }
 
@@ -152,10 +154,9 @@ impl CommandEncoder {
             width: area.extent.width + area.offset.x.max(0) as u32,
             height: area.extent.height + area.offset.y.max(0) as u32,
         };
-        let mut hasher = DefaultHasher::new();
-        extent.hash(&mut hasher);
-        views.iter().for_each(|t| t.id.hash(&mut hasher));
-        let framebuffer_key = hasher.finish();
+        extent.hash(&mut self.hasher);
+        views.iter().for_each(|t| t.id.hash(&mut self.hasher));
+        let framebuffer_key = self.hasher.finish();
 
         let framebuffer = *rpass.framebuffers.lock().entry(framebuffer_key).or_insert_with(|| unsafe {
             self.device
