@@ -118,6 +118,10 @@ impl CommandEncoder {
             self.bind_point
         );
     }
+
+    pub fn as_raw(&self) -> vk::CommandBuffer {
+        self.active
+    }
 }
 
 /// Base Pass
