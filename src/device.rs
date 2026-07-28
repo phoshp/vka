@@ -335,7 +335,7 @@ impl RenderingDevice {
                     device: device.clone(),
                     physical_device: phy_device,
                     debug_settings: Default::default(),
-                    buffer_device_address: features12.buffer_device_address != 0 || enabled_device_exts.contains(&vk::EXT_BUFFER_DEVICE_ADDRESS_NAME),
+                    buffer_device_address: features12.buffer_device_address != 0 || enabled_device_exts.contains(&vk::KHR_BUFFER_DEVICE_ADDRESS_NAME),
                     allocation_sizes: Default::default(),
                 })
                 .unwrap(),

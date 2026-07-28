@@ -1,5 +1,7 @@
+use std::any::TypeId;
 use std::ffi::CStr;
 use std::hash::DefaultHasher;
+use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -306,8 +308,9 @@ impl AsExtent3D for vk::Extent2D {
     }
 }
 
-pub fn hash_struct<T: Sized>(s: &T) -> u64 {
+pub fn hash_struct<T: Sized + 'static>(s: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
+    TypeId::of::<T>().hash(&mut hasher);
     hasher.write(bytes_of(s));
     hasher.finish()
 }
