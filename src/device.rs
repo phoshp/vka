@@ -176,7 +176,7 @@ impl RenderingDevice {
             log::info!("Layers: {}", enabled_layers.iter().map(|&v| v.to_str().unwrap()).join(", "));
             let instance = entry.create_instance(&instance_info, None)?;
 
-            let mut enabled_device_exts = vec![vk::KHR_DYNAMIC_RENDERING_NAME];
+            let mut enabled_device_exts = Vec::new();
             if cfg!(any(target_os = "macos", target_os = "ios")) {
                 enabled_device_exts.push(vk::KHR_PORTABILITY_SUBSET_NAME);
             }
@@ -263,10 +263,10 @@ impl RenderingDevice {
                         queue_families.present = i;
                     }
                 }
-                if props.queue_flags.contains(vk::QueueFlags::COMPUTE) {
+                if props.queue_flags.contains(vk::QueueFlags::COMPUTE) && !props.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                     queue_families.compute = i;
                 }
-                if props.queue_flags.contains(vk::QueueFlags::TRANSFER) {
+                if props.queue_flags.contains(vk::QueueFlags::TRANSFER) && !props.queue_flags.contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE) {
                     queue_families.transfer = i;
                 }
             }
@@ -274,6 +274,12 @@ impl RenderingDevice {
             if queue_families.present == vk::QUEUE_FAMILY_IGNORED {
                 queue_families.present = queue_families.graphics;
                 log::warn!("No present queue found, falling back to graphics queue");
+            }
+            if queue_families.compute == vk::QUEUE_FAMILY_IGNORED {
+                queue_families.compute = queue_families.graphics;
+            }
+            if queue_families.transfer == vk::QUEUE_FAMILY_IGNORED {
+                queue_families.transfer = queue_families.graphics;
             }
 
             log::info!("Creating logical device");

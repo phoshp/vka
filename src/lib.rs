@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::any::TypeId;
 use std::ffi::CStr;
 use std::hash::DefaultHasher;
@@ -308,9 +309,8 @@ impl AsExtent3D for vk::Extent2D {
     }
 }
 
-pub fn hash_struct<T: Sized + 'static>(s: &T) -> u64 {
+pub fn hash_struct<T: ?Sized>(s: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
-    TypeId::of::<T>().hash(&mut hasher);
     hasher.write(bytes_of(s));
     hasher.finish()
 }
