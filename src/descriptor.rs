@@ -99,14 +99,24 @@ impl RenderingDevice {
     pub fn new_descriptor_set_layout(&self, entries: &[DescriptorSetLayoutEntry]) -> DescriptorSetLayout {
         let bindings = entries
             .iter()
-            .map(|e| vk::DescriptorSetLayoutBinding::default().binding(e.binding).descriptor_type(e.ty).descriptor_count(e.count))
+            .map(|e| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(e.binding)
+                    .descriptor_type(e.ty)
+                    .descriptor_count(e.count)
+                    .stage_flags(vk::ShaderStageFlags::ALL)
+            })
             .collect::<Vec<_>>();
         let flags = entries.iter().map(|e| e.flags.unwrap_or_default()).collect::<Vec<_>>();
         let update_after_bind = flags.iter().any(|&f| f.contains(vk::DescriptorBindingFlags::UPDATE_AFTER_BIND));
 
         let mut binding_flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&flags);
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .flags(if update_after_bind { vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL } else { vk::DescriptorSetLayoutCreateFlags::empty() })
+            .flags(if update_after_bind {
+                vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL
+            } else {
+                vk::DescriptorSetLayoutCreateFlags::empty()
+            })
             .bindings(&bindings)
             .push_next(&mut binding_flags_info);
         let raw = unsafe { self.raw.create_descriptor_set_layout(&layout_info, None).expect("Failed to create descriptor set layout") };
@@ -138,7 +148,8 @@ impl RenderingDevice {
         let pool = unsafe { self.raw.create_descriptor_pool(&pool_info, None).expect("Failed to create descriptor pool") };
         let raw = unsafe {
             self.raw
-                .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[layout.raw])).expect("Failed to allocate descriptor sets")
+                .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[layout.raw]))
+                .expect("Failed to allocate descriptor sets")
         }[0];
         let inner = DescriptorSetImpl {
             raw,
