@@ -42,7 +42,6 @@ impl StagingBelt {
         let index = if let Some(i) = self.active_chunks.iter().position(|c| c.can_allocate(size)) {
             i
         } else {
-            assert!(size < self.chunk_size);
             let buffer = rd.new_buffer(
                 &BufferDesc::new(self.chunk_size.max(size))
                     .usage(vk::BufferUsageFlags::TRANSFER_SRC)
