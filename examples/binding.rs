@@ -17,18 +17,21 @@ pub fn main() {
             binding: 0,
             ty: vk::DescriptorType::UNIFORM_BUFFER,
             count: 1,
+            stages: vk::ShaderStageFlags::VERTEX,
             flags: None,
         },
         vka::DescriptorSetLayoutEntry {
             binding: 1,
             ty: vk::DescriptorType::SAMPLED_IMAGE,
             count: 1,
+            stages: vk::ShaderStageFlags::FRAGMENT,
             flags: None,
         },
         vka::DescriptorSetLayoutEntry {
             binding: 2,
             ty: vk::DescriptorType::SAMPLER,
             count: 1,
+            stages: vk::ShaderStageFlags::FRAGMENT,
             flags: None,
         },
     ]);

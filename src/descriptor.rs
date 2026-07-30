@@ -14,6 +14,7 @@ pub struct DescriptorSetLayoutEntry {
     pub binding: u32,
     pub ty: vk::DescriptorType,
     pub count: u32,
+    pub stages: vk::ShaderStageFlags,
     pub flags: Option<vk::DescriptorBindingFlags>,
 }
 
@@ -104,7 +105,7 @@ impl RenderingDevice {
                     .binding(e.binding)
                     .descriptor_type(e.ty)
                     .descriptor_count(e.count)
-                    .stage_flags(vk::ShaderStageFlags::ALL)
+                    .stage_flags(e.stages)
             })
             .collect::<Vec<_>>();
         let flags = entries.iter().map(|e| e.flags.unwrap_or_default()).collect::<Vec<_>>();
