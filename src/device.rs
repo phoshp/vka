@@ -551,9 +551,10 @@ impl RenderingDevice {
 
     pub fn advance_frame(&self) {
         let mut frame_idx = self.frame_counter.write();
-        let completed_submission = frame_idx.0.saturating_sub(self.frames.len() as u64);
-        self.staging_belt.lock().maintain(completed_submission);
-
+        let n_frames = self.frames.len() as u64;
+        if frame_idx.0 > self.frames.len() as u64 {
+            self.staging_belt.lock().maintain(frame_idx.0 - n_frames);
+        }
         frame_idx.0 += 1;
         frame_idx.1 = frame_idx.0 as usize % self.frames.len();
     }
