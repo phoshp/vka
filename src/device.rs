@@ -551,18 +551,22 @@ impl RenderingDevice {
 
     pub fn advance_frame(&self) {
         let mut frame_idx = self.frame_counter.write();
-        let n_frames = self.frames.len() as u64;
-        if frame_idx.0 > self.frames.len() as u64 {
+        let n_frames = self.n_frames() as u64;
+        if frame_idx.0 > n_frames {
             self.staging_belt.lock().maintain(frame_idx.0 - n_frames);
         }
         frame_idx.0 += 1;
-        frame_idx.1 = frame_idx.0 as usize % self.frames.len();
+        frame_idx.1 = (frame_idx.0 % n_frames) as usize;
     }
 
     pub fn wait_for(&self, frame_num: u64) {
         let frame_idx = self.frame_counter.read();
-        if frame_num >= frame_idx.0.saturating_sub(self.n_frames() as u64) {
-            let target = frame_num % self.frames.len() as u64;
+        let n_frames = self.n_frames() as u64;
+        if frame_idx.0 < frame_num {
+            return;
+        }
+        if frame_num >= (frame_idx.0 - n_frames) {
+            let target = frame_num % n_frames;
             self.wait_frame_fence(&mut self.frames[target as usize].lock());
         }
     }

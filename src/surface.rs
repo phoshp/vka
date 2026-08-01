@@ -111,6 +111,7 @@ impl Surface {
     }
 
     pub fn recreate_swapchain(&mut self) {
+        self.device.submit();
         self.device.wait_idle();
         self.device.reset_frames();
 
