@@ -152,14 +152,16 @@ fn conv_format_to_aspect_mask(format: vk::Format) -> vk::ImageAspectFlags {
 pub fn find_optimal_image_layout(usage: vk::ImageUsageFlags) -> vk::ImageLayout {
     if usage.contains(vk::ImageUsageFlags::STORAGE) {
         vk::ImageLayout::GENERAL
-    } else if usage.contains(vk::ImageUsageFlags::SAMPLED) || usage.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT) || usage.contains(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT) {
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
     } else if usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
     } else if usage.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT) {
-        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        if usage.contains(vk::ImageUsageFlags::SAMPLED) || usage.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT) {
+            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+        } else {
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        }
     } else {
-        vk::ImageLayout::GENERAL
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
     }
 }
 
